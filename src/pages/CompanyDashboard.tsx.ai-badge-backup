@@ -1,0 +1,1002 @@
+﻿import { useState } from 'react';
+declare global {
+  interface Window {
+    Razorpay: any;
+  }
+}
+import {
+  Briefcase, Building2, FileText, Bell, Plus, Users, Send,
+  MapPin, ShieldCheck, CheckCircle2, AlertCircle, X, Zap,
+  Cpu, Boxes, Lock, CreditCard, ChevronRight, XCircle, History,
+} from 'lucide-react';
+import { DashboardLayout } from '@/components/DashboardLayout';
+import { Modal } from '@/components/ui/Modal';
+import { StatusBadge } from '@/components/ui/StatusBadge';
+import { StatCard, EmptyState, SectionHeader } from '@/components/ui/Common';
+import { useStore } from '@/store/AppStore';
+import { TIER_PRICING } from '@/lib/mockBackend';
+import type { Application, VerificationTier, Verification } from '@/types/schema';
+
+type Tab = 'overview' | 'jobs' | 'applications' | 'verification_history' | 'notifications';
+
+export function CompanyDashboard() {
+  const store = useStore();
+  const { session } = store;
+  const [tab, setTab] = useState<Tab>('overview');
+  const [showPostJob, setShowPostJob] = useState(false);
+  const [selectedApp, setSelectedApp] = useState<Application | null>(null);
+  const [showTierModal, setShowTierModal] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyStep, setVerifyStep] = useState(0);
+  const [verifyResult, setVerifyResult] = useState<Verification | null>(null);
+
+  if (!session) return null;
+  const company = session.entity as typeof session.entity & { id: string };
+
+  const myJobs = store.jobs.filter((j) => j.company_id === company.id);
+  const myApps = store.getCompanyApplications(company.id);
+  const myNotifs = store.getNotificationsFor('company', session.user.id);
+
+  const tabs = [
+    { key: 'overview', label: 'Overview', icon: Building2 },
+    { key: 'jobs', label: 'Jobs', icon: Briefcase },
+    { key: 'applications', label: 'Applications', icon: Users },
+    { key: 'verification_history', label: 'Verification History', icon: History },
+    { key: 'notifications', label: 'Notifications', icon: Bell },
+  ];
+
+  async function handleVerification(app: Application, tier: VerificationTier, certificateFile: File | null) {
+    if ((tier === 'blockchain' || tier === 'combined') && !certificateFile) {
+      store.pushToast('Please upload the certificate file before verification.', 'error');
+      return;
+    }
+
+    setVerifying(true);
+    setVerifyStep(0);
+
+    try {
+      const verification = await store.requestVerification(app.id, tier);
+
+      setVerifyStep(1);
+      await store.payForVerification(verification.id);
+
+      if (tier === 'blockchain' || tier === 'combined') {
+        setVerifyStep(2);
+        await store.verifyOnBlockchain(verification.id, certificateFile!);
+      }
+
+      if (tier === 'ai_forgery' || tier === 'combined') {
+        setVerifyStep(3);
+        await store.verifyWithAI(verification.id);
+      }
+
+      setVerifyStep(4);
+      setVerifyResult(store.getVerificationForApplication(app.id) || verification);
+      setShowTierModal(false);
+    } catch (error) {
+      store.pushToast(error instanceof Error ? error.message : 'Verification failed', 'error');
+    } finally {
+      setVerifying(false);
+    }
+  }  function closeVerifyModal() {
+    if (verifying) return;
+    setShowTierModal(false);
+    setVerifyStep(0);
+    setVerifyResult(null);
+  }
+
+  return (
+    <DashboardLayout activeTab={tab} tabs={tabs} onTabChange={(k) => setTab(k as Tab)}>
+      {tab === 'overview' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <StatCard label="Jobs Posted" value={myJobs.length} icon={Briefcase} iconBg="bg-accent-50" iconColor="text-accent-600" />
+            <StatCard label="Applications" value={myApps.length} icon={Users} iconBg="bg-blue-50" iconColor="text-blue-600" />
+            <StatCard label="Verifications" value={store.verifications.filter((v) => v.company_id === company.id).length} icon={ShieldCheck} iconBg="bg-success-50" iconColor="text-success-600" />
+            <StatCard label="Pending" value={myApps.filter((a) => a.stage !== 'verification_completed').length} icon={AlertCircle} iconBg="bg-warning-50" iconColor="text-warning-600" />
+          </div>
+
+          <div className="card p-6">
+            <SectionHeader title="Recent Applications" action={<button onClick={() => setTab('applications')} className="btn-ghost text-accent-600">View all<ChevronRight className="w-4 h-4" /></button>} />
+            {myApps.length === 0 ? (
+              <EmptyState icon={Users} title="No applications yet" description="Post jobs to start receiving applications from students." action={<button onClick={() => setShowPostJob(true)} className="btn-primary"><Plus className="w-4 h-4" />Post a Job</button>} />
+            ) : (
+              <div className="space-y-3">
+                {myApps.slice(0, 5).map((app) => {
+                  const student = store.getStudentById(app.student_id);
+                  const applicantName = student?.full_name || app.student_name || 'Unknown applicant';
+                  const applicantEmail = student?.email || app.student_email || '';
+                  const job = store.getJobById(app.job_id);
+                  const ver = store.getVerificationForApplication(app.id);
+  const records = store.getStudentRecords(app.student_id);
+                  return (
+                    <div key={app.id} className="flex items-center gap-4 p-4 rounded-xl border border-slate-100 hover:bg-slate-50/50 transition-colors cursor-pointer" onClick={() => setSelectedApp(app)}>
+                      <div className="w-10 h-10 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-sm font-semibold">
+                        {applicantName.split(' ').map((w) => w[0]).join('')}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-slate-900">{applicantName}</p>
+                        <p className="text-xs text-slate-500">{job?.title}</p>
+                      </div>
+                      <StatusBadge status={ver?.verdict || app.stage} />
+                      <ChevronRight className="w-4 h-4 text-slate-400" />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === 'jobs' && (
+        <div className="space-y-5">
+          <SectionHeader title="Job Listings" description="Manage your posted jobs" action={<button onClick={() => setShowPostJob(true)} className="btn-primary"><Plus className="w-4 h-4" />Post Job</button>} />
+          {myJobs.length === 0 ? (
+            <div className="card p-6"><EmptyState icon={Briefcase} title="No jobs posted" description="Post your first job to start receiving applications." action={<button onClick={() => setShowPostJob(true)} className="btn-primary"><Plus className="w-4 h-4" />Post Job</button>} /></div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {myJobs.map((job) => {
+                const appCount = myApps.filter((a) => a.job_id === job.id).length;
+                return (
+                  <div key={job.id} className="card p-5 hover:shadow-card-hover transition-shadow">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-11 h-11 rounded-xl bg-accent-50 text-accent-600 flex items-center justify-center">
+                          <Briefcase className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900">{job.title}</p>
+                          <p className="text-xs text-slate-500">{job.location} â€¢ {job.salary_range}</p>
+                        </div>
+                      </div>
+                      <span className="px-2.5 py-1 rounded-full bg-slate-100 text-xs font-medium text-slate-600">{appCount} applicants</span>
+                    </div>
+                    <p className="text-sm text-slate-600 leading-relaxed line-clamp-2">{job.description}</p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'applications' && (
+        <ApplicationsTab companyId={company.id} onSelectApp={(app) => setSelectedApp(app)} />
+      )}
+
+      {tab === 'verification_history' && (
+        <VerificationHistoryTab companyId={company.id} />
+      )}
+
+      {tab === 'notifications' && (
+        <div className="card p-6">
+          <SectionHeader title="Notifications" description="Updates about applications and certificate uploads" />
+          {myNotifs.length === 0 ? (
+            <EmptyState icon={Bell} title="No notifications" description="You'll be notified when institutes upload certificates." />
+          ) : (
+            <div className="space-y-2">
+              {myNotifs.map((n) => (
+                <div key={n.id} className={`flex items-start gap-3 p-4 rounded-xl border ${n.read ? 'border-slate-100' : 'border-accent-100 bg-accent-50/30'}`}>
+                  <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center flex-shrink-0">
+                    {n.type === 'certificate_uploaded' ? <ShieldCheck className="w-4 h-4 text-accent-600" /> : <Bell className="w-4 h-4 text-slate-500" />}
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-slate-900">{n.title}</p>
+                    <p className="text-xs text-slate-500 mt-0.5">{n.message}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Post Job Modal */}
+      <PostJobModal open={showPostJob} onClose={() => setShowPostJob(false)} />
+
+      {/* Application Side Panel */}
+      {selectedApp && (
+        <ApplicationSidePanel
+          app={selectedApp}
+          onClose={() => setSelectedApp(null)}
+          onRequestVerification={() => { setShowTierModal(true); setVerifyResult(null); }}
+        />
+      )}
+
+      {/* Tier Selection + Verification Modal */}
+      <Modal open={showTierModal} onClose={closeVerifyModal} title="Verification" subtitle="Choose a verification tier" size="lg">
+        {verifying ? (
+          <VerificationStepper tier={verifyResult?.tier || 'combined'} step={verifyStep} />
+        ) : verifyResult ? (
+          <VerificationReport verification={verifyResult} onClose={closeVerifyModal} />
+        ) : selectedApp ? (
+          <TierSelection
+            app={selectedApp}
+            onSelect={(tier, certificateFile) => handleVerification(selectedApp, tier, certificateFile)}
+            onCancel={closeVerifyModal}
+          />
+        ) : null}
+      </Modal>
+    </DashboardLayout>
+  );
+}
+
+// ============================================================
+// Applications Tab
+// ============================================================
+
+function ApplicationsTab({ companyId, onSelectApp }: { companyId: string; onSelectApp: (app: Application) => void }) {
+  const store = useStore();
+  const [filter, setFilter] = useState<string>('all');
+  const apps = store.getCompanyApplications(companyId);
+
+  const filtered = filter === 'all' ? apps : apps.filter((a) => {
+    if (filter === 'pending') return a.stage !== 'verification_completed';
+    if (filter === 'verified') { const v = store.getVerificationForApplication(a.id); return v?.verdict === 'verified'; }
+    if (filter === 'suspicious') { const v = store.getVerificationForApplication(a.id); return v?.verdict === 'suspicious'; }
+    if (filter === 'invalid') { const v = store.getVerificationForApplication(a.id); return v?.verdict === 'invalid'; }
+    return true;
+  });
+
+  const FILTERS = [
+    { key: 'all', label: 'All' },
+    { key: 'pending', label: 'Pending' },
+    { key: 'verified', label: 'Verified' },
+    { key: 'suspicious', label: 'Suspicious' },
+    { key: 'invalid', label: 'Invalid' },
+  ];
+
+  return (
+    <div className="card p-6">
+      <SectionHeader title="Applications" description="Review and verify applicant certificates" />
+      {apps.length === 0 ? (
+        <EmptyState icon={Users} title="No applications yet" description="Applications from students will appear here." />
+      ) : (
+        <>
+          <div className="flex gap-2 mb-4 overflow-x-auto">
+            {FILTERS.map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setFilter(f.key)}
+                className={`px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
+                  filter === f.key ? 'bg-accent-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-2">Applicant</th>
+                  <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-2">Job</th>
+                  <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-2">Stage</th>
+                  <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-2">Verification</th>
+                  <th className="text-right text-xs font-semibold text-slate-500 uppercase tracking-wider py-3 px-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((app) => {
+                  const student = store.getStudentById(app.student_id);
+                  const applicantName = student?.full_name || app.student_name || 'Unknown applicant';
+                  const applicantEmail = student?.email || app.student_email || '';
+                  const job = store.getJobById(app.job_id);
+                  const ver = store.getVerificationForApplication(app.id);
+  const records = store.getStudentRecords(app.student_id);
+                  const cert = store.getCertificateForApplication(app.id);
+                    const hasCertificate = Boolean(
+                      app.certificate_id ||
+                      app.original_file_name ||
+                      app.sha256_hash
+                    );
+                  return (
+                    <tr key={app.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/50 transition-colors cursor-pointer" onClick={() => onSelectApp(app)}>
+                      <td className="py-3 px-2">
+                        <div className="flex items-center gap-3">
+                          <div className="w-9 h-9 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-xs font-semibold">
+                            {applicantName.split(' ').map((w) => w[0]).join('')}
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium text-slate-900">{applicantName}</p>
+                            <p className="text-xs text-slate-500">{applicantEmail}</p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-3 px-2 text-sm text-slate-600">{job?.title}</td>
+                      <td className="py-3 px-2"><StatusBadge status={app.stage} /></td>
+                      <td className="py-3 px-2">
+                        {ver?.verdict ? <StatusBadge status={ver.verdict} /> : (cert || hasCertificate) ? <span className="text-xs text-slate-500">Ready to verify</span> : <span className="text-xs text-slate-400">Awaiting certificate</span>}
+                      </td>
+                      <td className="py-3 px-2 text-right">
+                        <ChevronRight className="w-4 h-4 text-slate-400 inline" />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// Application Side Panel
+// ============================================================
+
+function ApplicationSidePanel({ app, onClose, onRequestVerification }: {
+  app: Application;
+  onClose: () => void;
+  onRequestVerification: () => void;
+}) {
+  const store = useStore();
+  const student = store.getStudentById(app.student_id);
+                  const applicantName = student?.full_name || app.student_name || 'Unknown applicant';
+                  const applicantEmail = student?.email || app.student_email || '';
+  const job = store.getJobById(app.job_id);
+  const company = store.getCompanyById(app.company_id);
+  const institute = store.getInstituteById(app.institute_id);
+  const cert = store.getCertificateForApplication(app.id);
+  const ver = store.getVerificationForApplication(app.id);
+  const records = store.getStudentRecords(app.student_id);
+
+  const instituteName = app.institute_name || institute?.name || "";
+  const hasAcademicRecord = Boolean(app.academic_record_id);
+  const hasCertificate = Boolean(
+    app.certificate_id ||
+    app.original_file_name ||
+    app.sha256_hash
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end animate-fade-in">
+      <div className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-md bg-white shadow-modal h-full overflow-y-auto animate-slide-in-right">
+        <div className="sticky top-0 bg-white border-b border-slate-100 p-5 flex items-center justify-between z-10">
+          <h2 className="text-base font-semibold text-slate-900">Application Details</h2>
+          <button onClick={onClose} className="p-2 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {/* Applicant */}
+          <div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Applicant</p>
+            <div className="flex items-center gap-3 p-4 rounded-xl bg-slate-50">
+              <div className="w-12 h-12 rounded-full bg-accent-100 text-accent-700 flex items-center justify-center text-sm font-semibold">
+                {applicantName.split(' ').map((w) => w[0]).join('')}
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-slate-900">{applicantName}</p>
+                <p className="text-xs text-slate-500">{applicantEmail}</p>
+                <p className="text-xs text-slate-500">{student?.enrollment_id} â€¢ {student?.program}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Job */}
+          <div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Job</p>
+            <div className="p-4 rounded-xl bg-slate-50">
+              <p className="text-sm font-semibold text-slate-900">{job?.title}</p>
+              <p className="text-xs text-slate-500 mt-1">{company?.name} â€¢ {job?.location}</p>
+              <p className="text-xs text-slate-500">{job?.salary_range}</p>
+              <p className="text-xs text-slate-600 mt-2 leading-relaxed">{job?.description}</p>
+            </div>
+          </div>
+          {/* Academic records */}
+          <div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Academic Records</p>
+            {app.academic_record_id || app.academic_title || app.course || app.grade || app.percentage || app.cgpa ? (
+              <div className="p-4 rounded-xl border border-slate-100 space-y-2">
+                <p className="text-sm font-semibold text-slate-900">
+                  {app.academic_title || app.record_type || "Academic Record"}
+                </p>
+                {app.course && (
+                  <p className="text-xs text-slate-600">Course: {app.course}</p>
+                )}
+                {app.department && (
+                  <p className="text-xs text-slate-600">Department: {app.department}</p>
+                )}
+                {app.grade && (
+                  <p className="text-xs text-slate-600">Grade: {app.grade}</p>
+                )}
+                {app.percentage !== null && app.percentage !== undefined && (
+                  <p className="text-xs text-slate-600">Percentage: {app.percentage}%</p>
+                )}
+                {app.cgpa !== null && app.cgpa !== undefined && (
+                  <p className="text-xs text-slate-600">CGPA: {app.cgpa}</p>
+                )}
+                {app.issue_date && (
+                  <p className="text-xs text-slate-600">Issue date: {app.issue_date}</p>
+                )}
+                {app.completion_date && (
+                  <p className="text-xs text-slate-600">Completion date: {app.completion_date}</p>
+                )}
+                {app.academic_description && (
+                  <p className="text-xs text-slate-600">{app.academic_description}</p>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400">No academic records on file.</p>
+            )}
+          </div>
+
+          {/* Certificate status */}
+          <div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Certificate</p>
+            {cert || hasCertificate ? (
+              <div className="p-4 rounded-xl bg-accent-50 border border-accent-100">
+                <div className="flex items-center gap-2 mb-2">
+                  <ShieldCheck className="w-4 h-4 text-accent-600" />
+                  <p className="text-sm font-medium text-accent-700">Certificate Uploaded</p>
+                </div>
+                <div className="space-y-1 text-xs text-slate-600">
+                  <p>File: {cert?.file_name || app.original_file_name || "Certificate file"}</p>
+                  <p className="font-mono">SHA-256: {(cert?.sha256_hash || app.sha256_hash || "Not available").slice(0, 24)}...</p>
+                  <p className="font-mono">IPFS CID: {(cert?.ipfs_cid || app.ipfs_cid || "Not available").slice(0, 24)}...</p>
+                  <p className="font-mono">Tx: {(cert?.blockchain_tx_hash || app.transaction_hash || "Not available").slice(0, 24)}...</p>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-amber-50 border border-amber-100">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-warning-600" />
+                  <p className="text-sm font-medium text-warning-700">Awaiting certificate from institute</p>
+                </div>
+                <p className="text-xs text-slate-500 mt-1">Institute: {instituteName || "—"}</p>
+              </div>
+            )}
+          </div>
+
+          {/* Verification result */}
+          {ver && ver.verdict && (
+            <div>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Verification Result</p>
+              <div className={`p-4 rounded-xl border ${
+                ver.verdict === 'verified' ? 'bg-success-50 border-success-100' :
+                ver.verdict === 'suspicious' ? 'bg-warning-50 border-warning-100' :
+                'bg-danger-50 border-danger-100'
+              }`}>
+                <div className="flex items-center gap-2 mb-2">
+                  {ver.verdict === 'verified' ? <CheckCircle2 className="w-5 h-5 text-success-600" /> :
+                   ver.verdict === 'suspicious' ? <AlertCircle className="w-5 h-5 text-warning-600" /> :
+                   <XCircle className="w-5 h-5 text-danger-600" />}
+                  <p className={`text-sm font-semibold ${
+                    ver.verdict === 'verified' ? 'text-success-700' :
+                    ver.verdict === 'suspicious' ? 'text-warning-700' : 'text-danger-700'
+                  }`}>{ver.verdict.toUpperCase()}</p>
+                </div>
+                <div className="space-y-1 text-xs text-slate-600">
+                  <p>Confidence: {ver.confidence}%</p>
+                  <p>Tier: <span className="capitalize">{ver.tier.replace('_', ' ')}</span></p>
+                  <p>Amount: ₹{ver.amount_paid}</p>
+                  {ver.blockchain_check.performed && <p>Blockchain: {ver.blockchain_check.match ? 'Hash Matched' : 'Hash Mismatch'}</p>}
+                  {ver.ai_forgery_check.performed && <p>AI Check: {ver.ai_forgery_check.result}</p>}
+                  {ver.blockchain_proof_ref && <p className="font-mono">Proof: {ver.blockchain_proof_ref.slice(0, 24)}...</p>}
+                </div>
+              </div>
+            </div>
+          )}          {/* Action */}
+          {(cert || hasCertificate) && !ver && app.stage !== 'selected' && app.stage !== 'verification_requested' && (
+            <button onClick={onRequestVerification} className="btn-primary w-full py-3">
+              <ShieldCheck className="w-4 h-4" />Request Verification
+            </button>
+          )}
+
+          {(cert || hasCertificate) && (ver || app.stage === 'verification_requested') && (
+            <div className="p-3 rounded-xl bg-blue-50 border border-blue-100 text-center">
+              <p className="text-sm font-medium text-blue-700">
+                Verification request already submitted
+              </p>
+              <p className="text-xs text-blue-600 mt-1">
+                You can view the result in Verification History once processing is complete.
+              </p>
+            </div>
+          )}
+
+          {!cert && !hasCertificate && (
+            <div className="p-3 rounded-xl bg-slate-50 text-center">
+              <p className="text-xs text-slate-500">
+                Verification will be available once the institute uploads the certificate.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Tier Selection
+// ============================================================
+
+function TierSelection({ app, onSelect, onCancel }: {
+  app: Application;
+  onSelect: (tier: VerificationTier, certificateFile: File | null) => void;
+  onCancel: () => void;
+}) {
+  const [selected, setSelected] = useState<VerificationTier | null>(null);
+  const [certificateFile, setCertificateFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [paying, setPaying] = useState(false);
+
+  const TIERS: { key: VerificationTier; icon: typeof Boxes; features: string[] }[] = [
+    { key: 'blockchain', icon: Boxes, features: ['SHA-256 hash comparison', 'On-chain proof verification', 'IPFS CID validation'] },
+    { key: 'ai_forgery', icon: Cpu, features: ['AI-powered tampering detection', 'Pixel-level analysis', 'Metadata consistency check'] },
+    { key: 'combined', icon: Zap, features: ['Full blockchain verification', 'AI forgery detection', 'Maximum confidence score', 'Complete verification report'] },
+  ];
+
+  function handlePay() {
+      if (!selected) return;
+      if (
+        (selected === 'blockchain' || selected === 'combined') &&
+        (!certificateFile || certificateFile.size === 0 || certificateFile.size > 10 * 1024 * 1024)
+      ) {
+        setFileError('Select a valid certificate file of 10 MB or less.');
+        return;
+      }
+      setPaying(false);
+      onSelect(selected, certificateFile);
+    }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {TIERS.map((tier) => {
+          const Icon = tier.icon;
+          const pricing = TIER_PRICING[tier.key];
+          const isSelected = selected === tier.key;
+          const isPopular = tier.key === 'combined';
+          return (
+            <button
+              key={tier.key}
+              onClick={() => setSelected(tier.key)}
+              className={`relative p-4 rounded-xl border-2 text-left transition-all ${
+                isSelected ? 'border-accent-600 bg-accent-50' : 'border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              {isPopular && (
+                <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-accent-600 text-white text-[10px] font-bold">POPULAR</span>
+              )}
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center mb-3 ${isSelected ? 'bg-accent-600' : 'bg-slate-100'}`}>
+                <Icon className={`w-5 h-5 ${isSelected ? 'text-white' : 'text-slate-500'}`} />
+              </div>
+              <p className="text-sm font-semibold text-slate-900">{pricing.label}</p>
+              <p className="text-2xl font-bold text-slate-900 mt-1">₹{pricing.price}</p>
+              <p className="text-xs text-slate-500 mt-1 leading-snug">{pricing.description}</p>
+              <ul className="mt-3 space-y-1.5">
+                {tier.features.map((f, i) => (
+                  <li key={i} className="flex items-start gap-1.5 text-xs text-slate-600">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-success-500 flex-shrink-0 mt-0.5" />
+                    {f}
+                  </li>
+                ))}
+              </ul>
+            </button>
+          );
+        })}
+      </div>
+
+      {selected && (
+        <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-slate-900">{TIER_PRICING[selected].label}</p>
+              <p className="text-xs text-slate-500">Secure payment via Razorpay Test Mode â€” no real charge</p>
+            </div>
+            <p className="text-lg font-bold text-slate-900">₹{TIER_PRICING[selected].price}</p>
+          </div>
+        </div>
+      )}
+
+      {(selected === 'blockchain' || selected === 'combined') && (
+        <div className="space-y-2 rounded-xl border border-slate-200 p-4">
+          <label className="block text-sm font-semibold text-slate-800">
+            Upload the certificate received from the student
+          </label>
+          <input
+            type="file"
+            accept=".pdf,.png,.jpg,.jpeg"
+            onChange={(event) => {
+              const file = event.target.files?.[0] ?? null;
+              setCertificateFile(file);
+              setFileError(
+                file && file.size > 10 * 1024 * 1024
+                  ? "File must be 10 MB or smaller."
+                  : null
+              );
+              if (file && file.size > 10 * 1024 * 1024) {
+                setCertificateFile(null);
+              }
+            }}
+            className="block w-full text-sm"
+          />
+          <p className="text-xs text-slate-500">
+            Upload the original file without modifying its contents. Maximum size: 10 MB.
+          </p>
+          {certificateFile && (
+            <p className="text-sm text-slate-700">
+              Selected: {certificateFile.name}
+            </p>
+          )}
+          {fileError && (
+            <p className="text-sm text-red-600">{fileError}</p>
+          )}
+        </div>
+      )}
+      <div className="flex gap-3 pt-2">
+        <button onClick={onCancel} className="btn-secondary flex-1" disabled={paying}>Cancel</button>
+        <button onClick={handlePay} disabled={!selected || paying || ((selected === 'blockchain' || selected === 'combined') && (!certificateFile || certificateFile.size === 0 || certificateFile.size > 10 * 1024 * 1024))} className="btn-primary flex-1">
+          {paying ? (<><Lock className="w-4 h-4 animate-pulse" />Processing Payment...</>) : (<><CreditCard className="w-4 h-4" />Pay & Verify</>)}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Verification Stepper (animated)
+// ============================================================
+
+function VerificationStepper({ tier, step }: { tier: VerificationTier; step: number }) {
+  const steps: { label: string; icon: typeof Boxes; desc: string }[] = [];
+
+  if (tier === 'blockchain' || tier === 'combined') {
+    steps.push({ label: 'Blockchain Verification', icon: Boxes, desc: 'Comparing document hash against on-chain stored original' });
+  }
+  if (tier === 'ai_forgery' || tier === 'combined') {
+    steps.push({ label: 'AI Forgery Detection', icon: Cpu, desc: 'Analyzing certificate for tampering signs' });
+  }
+  steps.push({ label: 'Generating Report', icon: FileText, desc: 'Compiling final verification report' });
+
+  return (
+    <div className="py-6">
+      <div className="text-center mb-6">
+        <div className="w-16 h-16 rounded-2xl bg-accent-600 flex items-center justify-center mx-auto mb-3 animate-pulse">
+          <ShieldCheck className="w-8 h-8 text-white" />
+        </div>
+        <p className="text-base font-semibold text-slate-900">Running Verification</p>
+        <p className="text-sm text-slate-500 mt-1">Please wait while we verify the certificate...</p>
+      </div>
+
+      <div className="space-y-4">
+        {steps.map((s, i) => {
+          const Icon = s.icon;
+          const isDone = i < step;
+          const isActive = i === step;
+          const isPending = i > step;
+          return (
+            <div key={i} className="flex items-start gap-4">
+              <div className="flex flex-col items-center">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${
+                  isDone ? 'bg-success-100' : isActive ? 'bg-accent-600' : 'bg-slate-100'
+                }`}>
+                  {isDone ? <CheckCircle2 className="w-5 h-5 text-success-600" /> :
+                   isActive ? <Icon className="w-5 h-5 text-white animate-pulse" /> :
+                   <Icon className="w-5 h-5 text-slate-400" />}
+                </div>
+                {i < steps.length - 1 && <div className={`w-0.5 h-10 mt-1 rounded-full ${isDone ? 'bg-success-200' : 'bg-slate-100'}`} />}
+              </div>
+              <div className="pt-1.5">
+                <p className={`text-sm font-medium ${isPending ? 'text-slate-400' : 'text-slate-900'}`}>{s.label}</p>
+                <p className={`text-xs mt-0.5 ${isPending ? 'text-slate-400' : 'text-slate-500'}`}>{s.desc}</p>
+                {isActive && <p className="text-xs text-accent-600 mt-1 font-medium animate-pulse">Processing...</p>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-6">
+        <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+          <div className="h-full bg-accent-600 rounded-full transition-all duration-500" style={{ width: `${((step + 1) / steps.length) * 100}%` }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Verification Report
+// ============================================================
+
+function VerificationReport({ verification, onClose }: { verification: Verification; onClose: () => void }) {
+  const verdictConfig = {
+    verified: { bg: 'bg-success-50', border: 'border-success-100', text: 'text-success-700', icon: CheckCircle2, iconColor: 'text-success-600', label: 'VERIFIED' },
+    suspicious: { bg: 'bg-warning-50', border: 'border-warning-100', text: 'text-warning-700', icon: AlertCircle, iconColor: 'text-warning-600', label: 'SUSPICIOUS' },
+    invalid: { bg: 'bg-danger-50', border: 'border-danger-100', text: 'text-danger-700', icon: XCircle, iconColor: 'text-danger-600', label: 'INVALID' },
+  };
+  const cfg = verdictConfig[verification.verdict!];
+  const Icon = cfg.icon;
+
+  return (
+    <div className="space-y-5">
+      {/* Verdict badge */}
+      <div className={`p-6 rounded-2xl border-2 ${cfg.border} ${cfg.bg} text-center`}>
+        <div className={`w-16 h-16 rounded-2xl ${cfg.bg} flex items-center justify-center mx-auto mb-3`}>
+          <Icon className={`w-8 h-8 ${cfg.iconColor}`} />
+        </div>
+        <p className={`text-2xl font-bold ${cfg.text}`}>{cfg.label}</p>
+        <p className="text-sm text-slate-500 mt-1">Confidence: {verification.confidence}%</p>
+      </div>
+
+      {/* Check details */}
+      <div className="space-y-3">
+        <div className="p-4 rounded-xl border border-slate-100">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Boxes className="w-4 h-4 text-accent-600" />
+              <p className="text-sm font-medium text-slate-900">Blockchain Status</p>
+            </div>
+            <span className={`text-xs font-medium ${!verification.blockchain_check.performed ? 'text-slate-500' : verification.blockchain_check.match === true ? 'text-success-600' : verification.blockchain_check.match === false ? 'text-danger-600' : 'text-warning-600'}`}>
+              {!verification.blockchain_check.performed ? 'Not Performed' : verification.blockchain_check.match === true ? 'Hash Matched' : verification.blockchain_check.match === false ? 'Hash Mismatch' : 'Pending'}
+            </span>
+          </div>
+          {verification.blockchain_check.performed && (
+            <div className="space-y-1 text-xs text-slate-500 font-mono">
+              <p>Stored: {verification.blockchain_check.stored_hash.slice(0, 32)}...</p>
+              <p>Document: {verification.blockchain_check.document_hash.slice(0, 32)}...</p>
+            </div>
+          )}
+        </div>
+
+        {verification.ai_forgery_check.performed && (
+          <div className="p-4 rounded-xl border border-slate-100">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-accent-600" />
+                <p className="text-sm font-medium text-slate-900">AI Forgery Check</p>
+              </div>
+              <span className={`text-xs font-medium ${verification.ai_forgery_check.result === 'genuine' ? 'text-success-600' : verification.ai_forgery_check.result === 'forged' ? 'text-red-600' : 'text-warning-600'}`}>{verification.ai_forgery_check.result === 'genuine' ? 'Genuine' : verification.ai_forgery_check.result === 'forged' ? 'Forged' : 'Suspicious'}</span>
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs text-slate-500">Confidence: {verification.ai_forgery_check.confidence_score}%</p>
+              {verification.ai_forgery_check.forgery_probability != null && (
+                <p className="text-xs text-slate-500">Forgery Probability: {verification.ai_forgery_check.forgery_probability.toFixed(2)}%</p>
+              )}
+              {verification.ai_forgery_check.indicators.map((ind, i) => (
+                <p key={i} className="text-xs text-slate-600 flex items-start gap-1.5">
+                  <span className={`w-1 h-1 rounded-full mt-1.5 flex-shrink-0 ${verification.ai_forgery_check.result === 'genuine' ? 'bg-success-500' : 'bg-warning-500'}`} />
+                  {ind}
+                </p>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Blockchain proof */}
+      {verification.blockchain_proof_ref && (
+        <div className="p-4 rounded-xl bg-slate-900">
+          <div className="flex items-center gap-2 mb-2">
+            <Lock className="w-4 h-4 text-accent-400" />
+            <p className="text-xs font-medium text-slate-400">Blockchain Proof Reference</p>
+          </div>
+          <p className="text-xs font-mono text-accent-300 break-all">{verification.blockchain_proof_ref}</p>
+        </div>
+      )}
+
+      {/* Summary */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="p-3 rounded-lg bg-slate-50 text-center">
+          <p className="text-xs text-slate-500">Tier</p>
+          <p className="text-sm font-medium text-slate-900 capitalize">{verification.tier.replace('_', ' ')}</p>
+        </div>
+        <div className="p-3 rounded-lg bg-slate-50 text-center">
+          <p className="text-xs text-slate-500">Amount Paid</p>
+          <p className="text-sm font-medium text-slate-900">₹{verification.amount_paid}</p>
+        </div>
+        <div className="p-3 rounded-lg bg-slate-50 text-center">
+          <p className="text-xs text-slate-500">Date</p>
+          <p className="text-sm font-medium text-slate-900">{new Date(verification.report_generated_at!).toLocaleDateString()}</p>
+        </div>
+      </div>
+
+      <button onClick={onClose} className="btn-primary w-full py-3">Done</button>
+    </div>
+  );
+}
+
+// ============================================================
+// Post Job Modal
+// ============================================================
+
+function PostJobModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { postJob } = useStore();
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [requirements, setRequirements] = useState('');
+  const [location, setLocation] = useState('');
+  const [salaryRange, setSalaryRange] = useState('');
+
+  function handleSubmit() {
+    if (!title.trim() || !description.trim() || !requirements.trim()) return;
+    postJob({ title, description, requirements, location, salaryRange });
+    setTitle(''); setDescription(''); setRequirements(''); setLocation(''); setSalaryRange('');
+    onClose();
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Post a Job" subtitle="Create a new job listing visible to all students" size="lg">
+      <div className="space-y-4">
+        <div>
+          <label className="label-text">Job Title</label>
+          <input className="input-field" placeholder="e.g. Junior Software Engineer" value={title} onChange={(e) => setTitle(e.target.value)} />
+        </div>
+        <div>
+          <label className="label-text">Description</label>
+          <textarea className="input-field min-h-[80px] resize-none" placeholder="Describe the role and responsibilities..." value={description} onChange={(e) => setDescription(e.target.value)} />
+        </div>
+        <div>
+          <label className="label-text">Requirements</label>
+          <textarea className="input-field min-h-[60px] resize-none" placeholder="List the qualifications and skills required..." value={requirements} onChange={(e) => setRequirements(e.target.value)} />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="label-text">Location</label>
+            <input className="input-field" placeholder="Bangalore, India" value={location} onChange={(e) => setLocation(e.target.value)} />
+          </div>
+          <div>
+            <label className="label-text">Salary Range</label>
+            <input className="input-field" placeholder="₹8-12 LPA" value={salaryRange} onChange={(e) => setSalaryRange(e.target.value)} />
+          </div>
+        </div>
+      <div className="flex gap-3 pt-2">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} className="btn-primary flex-1"><Plus className="w-4 h-4" />Post Job</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ============================================================
+// Verification History Tab
+// ============================================================
+
+function VerificationHistoryTab({ companyId }: { companyId: string }) {
+  const store = useStore();
+  const myVerifications = store.verifications.filter((v) => v.company_id === companyId);
+
+  return (
+    <div className="space-y-5">
+      <SectionHeader title="Verification History" description="All verification reports generated by your company" />
+      {myVerifications.length === 0 ? (
+        <div className="card p-6">
+          <EmptyState icon={History} title="No verifications yet" description="When you request certificate verifications, the reports will appear here." />
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {myVerifications.map((ver) => {
+            const app = store.getApplicationById(ver.application_id);
+            const student = store.getStudentById(ver.student_id);
+            const applicantName = student?.full_name || app?.student_name || 'Unknown applicant';
+            const applicantEmail = student?.email || app?.student_email || '';
+            const job = app ? store.getJobById(app.job_id) : undefined;
+            const cert = store.getCertificateForApplication(ver.application_id);
+
+            const verdictConfig = {
+              verified: { bg: 'bg-success-50', border: 'border-success-100', text: 'text-success-700', icon: CheckCircle2, iconColor: 'text-success-600', label: 'VERIFIED' },
+              suspicious: { bg: 'bg-warning-50', border: 'border-warning-100', text: 'text-warning-700', icon: AlertCircle, iconColor: 'text-warning-600', label: 'SUSPICIOUS' },
+              invalid: { bg: 'bg-danger-50', border: 'border-danger-100', text: 'text-danger-700', icon: XCircle, iconColor: 'text-danger-600', label: 'INVALID' },
+            };
+            const cfg = ver.verdict ? verdictConfig[ver.verdict] : null;
+            const VIcon = cfg?.icon;
+
+            return (
+              <div key={ver.id} className="card p-5 hover:shadow-card-hover transition-shadow">
+                <div className="flex items-start justify-between mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-xl bg-slate-100 text-slate-600 flex items-center justify-center text-sm font-semibold">
+                      {applicantName.split(' ').map((w) => w[0]).join('')}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">{applicantName}</p>
+                      <p className="text-xs text-slate-500">{job?.title} â€¢ {ver.tier.replace('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase())}</p>
+                    </div>
+                  </div>
+                  {cfg && VIcon && (
+                    <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full ${cfg.bg} ${cfg.border} border`}>
+                      <VIcon className={`w-4 h-4 ${cfg.iconColor}`} />
+                      <span className={`text-xs font-bold ${cfg.text}`}>{cfg.label}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                  <div className="p-3 rounded-lg bg-slate-50">
+                    <p className="text-slate-500">Confidence</p>
+                    <p className="font-medium text-slate-900 mt-0.5">{ver.confidence}%</p>
+                  </div>
+                  <div className="p-3 rounded-lg bg-slate-50">
+                    <p className="text-slate-500">Amount Paid</p>
+                    <p className="font-medium text-slate-900 mt-0.5">₹{ver.amount_paid}</p>
+                  </div>
+                  <div className="p-3 rounded-lg bg-slate-50">
+                    <p className="text-slate-500">Date</p>
+                    <p className="font-medium text-slate-900 mt-0.5">{ver.report_generated_at ? new Date(ver.report_generated_at).toLocaleDateString() : 'â€”'}</p>
+                  </div>
+                  <div className="p-3 rounded-lg bg-slate-50">
+                    <p className="text-slate-500">Tier</p>
+                    <p className="font-medium text-slate-900 mt-0.5 capitalize">{ver.tier.replace('_', ' ')}</p>
+                  </div>
+                </div>
+
+                {(ver.blockchain_check.performed || ver.ai_forgery_check.performed) && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {ver.blockchain_check.performed && (
+                      <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium ${ver.blockchain_check.match ? 'bg-success-50 text-success-600' : 'bg-danger-50 text-danger-600'}`}>
+                        <Boxes className="w-3.5 h-3.5" />
+                        Blockchain: {ver.blockchain_check.match ? 'Hash Matched' : 'Hash Mismatch'}
+                      </span>
+                    )}
+                    {ver.ai_forgery_check.performed && (
+                      <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium ${ver.ai_forgery_check.result === 'genuine' ? 'bg-success-50 text-success-600' : 'bg-warning-50 text-warning-600'}`}>
+                        <Cpu className="w-3.5 h-3.5" />
+                        AI: {ver.ai_forgery_check.result === 'genuine' ? 'Genuine' : 'Suspicious'}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {ver.blockchain_proof_ref && (
+                  <div className="mt-3 p-3 rounded-lg bg-slate-900">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Lock className="w-3.5 h-3.5 text-accent-400" />
+                      <p className="text-xs font-medium text-slate-400">Blockchain Proof</p>
+                    </div>
+                    <p className="text-xs font-mono text-accent-300 truncate">{ver.blockchain_proof_ref}</p>
+                  </div>
+                )}
+
+                {cert && (
+                  <div className="mt-3 pt-3 border-t border-slate-50 text-xs text-slate-500">
+                    <p className="font-mono">SHA-256: {(cert?.sha256_hash || app.sha256_hash || "Not available").slice(0, 24)}...</p>
+                    <p className="font-mono mt-0.5">IPFS: {(cert?.ipfs_cid || app.ipfs_cid || "Not available").slice(0, 24)}...</p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,2125 @@
+﻿// ============================================================
+// Global App Store Ã¢â‚¬â€ central state management with the
+// complete CertiGuard workflow logic. All data is structured
+// as typed objects mirroring a real relational DB schema.
+// ============================================================
+
+declare global {
+  interface Window {
+    Razorpay: any;
+  }
+}
+
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
+import type {
+  User, Institute, Student, Company, AcademicRecord, Certificate,
+  Job, Application, Verification, AppNotification, AuthSession,
+  UserRole, VerificationTier, VerificationVerdict,
+} from '@/types/schema';
+import {
+  mockSha256,
+  mockIpfsCid,
+  mockTxHash,
+  MOCK_CONTRACT_ADDRESS,
+} from '@/lib/mockBackend';
+
+// ---- Toast system ----
+export interface Toast {
+  id: string;
+  message: string;
+  type: 'success' | 'error' | 'info' | 'warning';
+}
+
+// ---- Helper ----
+function uid(prefix: string): string {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function nowISO(): string {
+  return new Date().toISOString();
+}
+
+// ============================================================
+// Backend API
+// ============================================================
+
+const API_BASE_URL = 'http://localhost:5000/api';
+
+async function apiRequest<T>(
+  endpoint: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    ...options,
+    headers: { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(options.headers || {}) },
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(
+      data?.message || `API request failed with status ${response.status}`,
+    ) as Error & { status?: number; data?: unknown };
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+
+  return data as T;
+}
+
+// ============================================================
+// Mock Seed Data Ã¢â‚¬â€ structured exactly like DB rows
+// ============================================================
+
+const seedUsers: User[] = [
+  { id: 'usr_inst1', email: 'institute@test.com', password_hash: 'mock', role: 'institute', name: 'National Institute of Technology', created_at: '2025-01-15T10:00:00Z' },
+  { id: 'usr_stu1', email: 'student@test.com', password_hash: 'mock', role: 'student', name: 'Arjun Sharma', created_at: '2025-02-01T10:00:00Z' },
+  { id: 'usr_stu2', email: 'priya@certguard.edu', password_hash: 'mock', role: 'student', name: 'Priya Patel', created_at: '2025-02-05T10:00:00Z' },
+  { id: 'usr_comp1', email: 'company@certguard.edu', password_hash: 'mock', role: 'company', name: 'TechCorp Solutions', created_at: '2025-01-20T10:00:00Z' },
+];
+
+const seedInstitutes: Institute[] = [
+  { id: 'inst1', user_id: 'usr_inst1', name: 'National Institute of Technology', email: 'institute@test.com', location: 'Mumbai, India', established_year: 1960, created_at: '2025-01-15T10:00:00Z' },
+];
+
+const seedStudents: Student[] = [
+  { id: 'stu1', user_id: 'usr_stu1', full_name: 'Arjun Sharma', email: 'student@test.com', institute_id: 'inst1', enrollment_id: 'NIT2021001', program: 'Computer Science', created_at: '2025-02-01T10:00:00Z' },
+  { id: 'stu2', user_id: 'usr_stu2', full_name: 'Priya Patel', email: 'priya@certguard.edu', institute_id: 'inst1', enrollment_id: 'NIT2021002', program: 'Electronics Engineering', created_at: '2025-02-05T10:00:00Z' },
+];
+
+const seedCompanies: Company[] = [
+  { id: 'comp1', user_id: 'usr_comp1', name: 'TechCorp Solutions', email: 'company@certguard.edu', industry: 'Information Technology', location: 'Bangalore, India', created_at: '2025-01-20T10:00:00Z' },
+];
+
+const seedRecords: AcademicRecord[] = [
+  { id: 'rec1', student_id: 'stu1', institute_id: 'inst1', degree: 'B.Tech', course: 'Computer Science', grade: 'A+', graduation_year: 2024, created_at: '2025-02-10T10:00:00Z' },
+  { id: 'rec2', student_id: 'stu2', institute_id: 'inst1', degree: 'B.Tech', course: 'Electronics Engineering', grade: 'A', graduation_year: 2024, created_at: '2025-02-12T10:00:00Z' },
+];
+
+const seedJobs: Job[] = [
+  { id: 'job1', company_id: 'comp1', title: 'Junior Software Engineer', description: 'Join our engineering team to build scalable web applications using modern technologies.', requirements: 'B.Tech in CS/IT, proficiency in JavaScript/Python, strong problem-solving skills', location: 'Bangalore, India', salary_range: 'Ã¢â€šÂ¹8-12 LPA', created_at: '2025-03-01T10:00:00Z' },
+  { id: 'job2', company_id: 'comp1', title: 'Data Analyst', description: 'Analyze large datasets to drive business decisions and build data pipelines.', requirements: 'B.Tech/BCA, SQL proficiency, experience with Python/R, data visualization skills', location: 'Remote', salary_range: 'Ã¢â€šÂ¹6-10 LPA', created_at: '2025-03-05T10:00:00Z' },
+];
+
+// Applications, Certificates, Verifications, Notifications all start EMPTY
+// (no pre-existing verified records Ã¢â‚¬â€ everything starts pending)
+
+// ============================================================
+// Store Interface
+// ============================================================
+
+interface StoreContextValue {
+  // auth
+  session: AuthSession | null;
+  login: (email: string, password: string, role: UserRole) => Promise<boolean>;
+  register: (data: { email: string; password: string; role: UserRole; name: string; extra?: Record<string, string> }) => boolean;
+  logout: () => void;
+
+  // data collections
+  users: User[];
+  institutes: Institute[];
+  students: Student[];
+  companies: Company[];
+  records: AcademicRecord[];
+  certificates: Certificate[];
+  jobs: Job[];
+  applications: Application[];
+  verifications: Verification[];
+  notifications: AppNotification[];
+
+  // institute actions
+  addStudent: (data: { fullName: string; email: string; enrollmentId: string; program: string }) => void;
+  addAcademicRecord: (data: { studentId: string; degree: string; course: string; grade: string; graduationYear: number }) => void;
+  updateAcademicRecord: (recordId: string, data: { studentId: string; degree: string; course: string; grade: string; graduationYear: number }) => Promise<void>;
+  uploadCertificate: (data: { applicationId: string; studentId: string; recordId: string; file: File }) => Promise<Certificate>;
+  approveApplication: (applicationId: string) => Promise<void>;
+  rejectApplication: (applicationId: string) => Promise<void>;
+
+  // student actions
+  applyToJob: (jobId: string, coverNote: string) => Promise<void>;
+
+  // company actions
+  postJob: (data: { title: string; description: string; requirements: string; location: string; salaryRange: string }) => void;
+  requestVerification: (applicationId: string, tier: VerificationTier) => Promise<Verification>;
+  payForVerification: (verificationId: string) => Promise<void>;
+  verifyOnBlockchain: (verificationId: string, certificateFile: File) => Promise<void>;
+  verifyWithAI: (verificationId: string) => Promise<void>;
+
+  // notifications
+  getNotificationsFor: (role: UserRole, userId: string) => AppNotification[];
+  markNotificationRead: (id: string) => void;
+  markAllNotificationsRead: (role: UserRole, userId: string) => void;
+
+  // toasts
+  toasts: Toast[];
+  pushToast: (message: string, type?: Toast['type']) => void;
+  dismissToast: (id: string) => void;
+
+  // helpers
+  getStudentRecords: (studentId: string) => AcademicRecord[];
+  getStudentApplications: (studentId: string) => Application[];
+  getCompanyApplications: (companyId: string) => Application[];
+  getInstituteStudents: (instituteId: string) => Student[];
+  getInstituteRecords: (instituteId: string) => AcademicRecord[];
+  getVerificationForApplication: (applicationId: string) => Verification | undefined;
+  getCertificateForApplication: (applicationId: string) => Certificate | undefined;
+  getJobById: (id: string) => Job | undefined;
+  getStudentById: (id: string) => Student | undefined;
+  getCompanyById: (id: string) => Company | undefined;
+  getInstituteById: (id: string) => Institute | undefined;
+  getRecordById: (id: string) => AcademicRecord | undefined;
+  getApplicationById: (id: string) => Application | undefined;
+}
+
+const StoreContext = createContext<StoreContextValue | null>(null);
+
+// ============================================================
+// Provider
+// ============================================================
+
+export function StoreProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [users, setUsers] = useState<User[]>(seedUsers);
+  const [institutes, setInstitutes] = useState<Institute[]>(seedInstitutes);
+  const [students, setStudents] = useState<Student[]>(seedStudents);
+  const [companies, setCompanies] = useState<Company[]>(seedCompanies);
+  const [records, setRecords] = useState<AcademicRecord[]>(seedRecords);
+  const [certificates, setCertificates] = useState<Certificate[]>([]);
+  const [jobs, setJobs] = useState<Job[]>(seedJobs);
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [verifications, setVerifications] = useState<Verification[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  useEffect(() => {
+    if (!session || session.user.role !== 'institute') return;
+
+    let cancelled = false;
+
+    const loadInstituteData = async () => {
+      try {
+        const headers = {
+          'x-user-id': session.user.id,
+          'x-user-email': session.user.email,
+        };
+
+        const [studentsResponse, recordsResponse, applicationsResponse, notificationsResponse] = await Promise.all([
+          fetch(`${API_BASE_URL}/institutes/me/students`, { headers }),
+          fetch(`${API_BASE_URL}/institutes/me/academic-records`, { headers }),
+          fetch(`${API_BASE_URL}/institutes/me/applications`, { headers }),
+          fetch(`${API_BASE_URL}/institutes/me/notifications`, { headers }),
+        ]);
+
+        if (!studentsResponse.ok) {
+          throw new Error(`Students API failed: ${studentsResponse.status}`);
+        }
+
+        if (!recordsResponse.ok) {
+          throw new Error(`Academic records API failed: ${recordsResponse.status}`);
+        }
+
+        if (!applicationsResponse.ok) {
+          throw new Error(`Applications API failed: ${applicationsResponse.status}`);
+        }
+
+
+        if (!notificationsResponse.ok) {
+          throw new Error(`Student notifications API failed: ${notificationsResponse.status}`);
+        }
+
+        if (!notificationsResponse.ok) {
+          throw new Error(`Student notifications API failed: ${notificationsResponse.status}`);
+        }
+        if (!notificationsResponse.ok) {
+          throw new Error(`Notifications API failed: ${notificationsResponse.status}`);
+        }
+
+        const studentsResult = await studentsResponse.json();
+        const recordsResult = await recordsResponse.json();
+        const applicationsResult = await applicationsResponse.json();
+
+        const notificationsResult = await notificationsResponse.json();
+
+
+        if (cancelled) return;
+
+        const backendStudents: Student[] = (studentsResult.students || []).map(
+          (s: any) => ({
+            id: String(s.id),
+            user_id: String(s.user_id),
+            full_name: s.full_name || '',
+            email: s.email || '',
+            institute_id: String(s.institute_id),
+            enrollment_id: s.student_id || '',
+            program: s.course || '',
+            created_at: s.created_at || nowISO(),
+          }),
+        );
+const backendApplications: Application[] = (applicationsResult.applications || []).map((a: any) => ({
+          id: String(a.id),
+          job_id: String(a.job_id),
+          student_id: String(a.student_id),
+          institute_id: String(session.entity.id),
+          company_id: String(a.company_id || ''),
+          cover_note: a.cover_letter || '',
+          stage: (a.status === 'selected' ? 'selected' : a.status === 'rejected' ? 'rejected' : a.status === 'verified' ? 'verification_completed' : a.status === 'certificate_uploaded' ? 'certificate_uploaded' : a.status === 'verification_requested' ? 'verification_requested' : 'applied') as ApplicationStage,
+          applied_at: a.applied_at || nowISO(),
+          certificate_id: a.certificate_id && a.certificate_blockchain_status === 'confirmed' ? String(a.certificate_id) : null,
+        }));
+        const backendCertificates: Certificate[] = (applicationsResult.applications || [])
+          .filter((a: any) => a.certificate_id && a.certificate_transaction_hash)
+          .map((a: any) => ({
+            id: String(a.certificate_id),
+            student_id: String(a.student_id),
+            institute_id: String(session.entity.id),
+            record_id: '',
+            application_id: String(a.id),
+            file_name: a.submitted_file_name || 'certificate',
+            file_size: 0,
+            sha256_hash: a.submitted_sha256_hash || '',
+            ipfs_cid: a.submitted_ipfs_cid || '',
+            blockchain_tx_hash: a.certificate_transaction_hash || '',
+            blockchain_contract_address: '',
+            uploaded_at: a.updated_at || a.applied_at || nowISO(),
+          }));
+
+        setCertificates(backendCertificates);
+        setApplications(backendApplications);
+
+        const backendNotifications: AppNotification[] = (notificationsResult.notifications || []).map((n: any) => ({
+          id: String(n.id),
+          recipient_role: 'institute',
+          recipient_id: String(n.user_id),
+          type: n.type as AppNotification['type'],
+          title: n.title || '',
+          message: n.message || '',
+          student_id: n.related_application_id ? String(backendApplications.find((a: any) => String(a.id) === String(n.related_application_id))?.student_id || '') : null,
+          job_id: n.related_application_id ? String(backendApplications.find((a: any) => String(a.id) === String(n.related_application_id))?.job_id || '') : null,
+          read: Boolean(n.is_read),
+          created_at: n.created_at || nowISO(),
+        }));
+
+        setNotifications((prev) => {
+          const localNotifications = prev.filter((n) => n.recipient_role !== 'institute' || !backendNotifications.some((bn) => bn.id === n.id));
+          return [...backendNotifications, ...localNotifications];
+        });
+
+        const backendRecords: AcademicRecord[] = (recordsResult.records || []).map(
+          (r: any) => ({
+            id: String(r.id),
+            student_id: String(r.student_id),
+            institute_id: String(r.institute_id),
+            degree: r.degree || r.title || '',
+            course: r.course || '',
+            grade: r.grade || '',
+            graduation_year: Number(r.graduation_year || 0),
+            created_at: r.created_at || nowISO(),
+          }),
+        );
+
+        setStudents(backendStudents);
+        setRecords(backendRecords);
+      } catch (error) {
+        console.error('Institute backend sync failed:', error);
+      }
+    };
+
+    loadInstituteData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+  useEffect(() => {
+    if (!session || session.user.role !== 'student') return;
+
+    let cancelled = false;
+
+    const loadStudentData = async () => {
+      try {
+        const headers = {
+          'x-user-id': session.user.id,
+        };
+
+        const [studentResponse, recordsResponse, jobsResponse, applicationsResponse, notificationsResponse] = await Promise.all([
+          fetch(`${API_BASE_URL}/students/me`, { headers }),
+          fetch(`${API_BASE_URL}/students/me/records`, { headers }),
+          fetch(`${API_BASE_URL}/students/jobs`),
+          fetch(`${API_BASE_URL}/students/me/applications`, { headers }),
+          fetch(`${API_BASE_URL}/students/me/notifications`, { headers }),
+        ]);
+
+        if (!studentResponse.ok) {
+          throw new Error(`Student API failed: ${studentResponse.status}`);
+        }
+
+        if (!recordsResponse.ok) {
+          throw new Error(`Student records API failed: ${recordsResponse.status}`);
+        }
+
+        if (!jobsResponse.ok) {
+          throw new Error(`Student jobs API failed: ${jobsResponse.status}`);
+        }
+
+        if (!applicationsResponse.ok) {
+          throw new Error(`Student applications API failed: ${applicationsResponse.status}`);
+        }
+
+        const studentResult = await studentResponse.json();
+        const recordsResult = await recordsResponse.json();
+        const jobsResult = await jobsResponse.json();
+        const applicationsResult = await applicationsResponse.json();
+
+        const notificationsResult = await notificationsResponse.json();
+
+
+        if (cancelled) return;
+
+        const backendStudent = studentResult.student;
+
+        if (backendStudent) {
+          const mappedStudent: Student = {
+            id: String(backendStudent.id),
+            user_id: String(backendStudent.user_id),
+            full_name: backendStudent.full_name || '',
+            email: backendStudent.email || '',
+            institute_id: String(backendStudent.institute_id),
+            enrollment_id: backendStudent.student_id || '',
+            program: backendStudent.course || '',
+            created_at: backendStudent.created_at || nowISO(),
+          };
+
+          setStudents((prev) => {
+            const exists = prev.some((s) => s.id === mappedStudent.id);
+
+            return exists
+              ? prev.map((s) => (s.id === mappedStudent.id ? mappedStudent : s))
+              : [...prev, mappedStudent];
+          });
+
+          setSession((prev) => {
+            if (!prev || prev.user.role !== 'student') return prev;
+            const currentStudent = prev.entity as Student;
+            return currentStudent.id === mappedStudent.id
+              ? prev
+              : { ...prev, entity: mappedStudent };
+          });
+        }
+const backendApplications: Application[] = (applicationsResult.applications || []).map((a: any) => ({
+          id: String(a.id),
+          job_id: String(a.job_id),
+          student_id: String(a.student_id),
+          institute_id: String(session.entity.id),
+          company_id: String(a.company_id || ''),
+          cover_note: a.cover_letter || '',
+          stage: (a.status === 'selected' ? 'selected' : a.status === 'rejected' ? 'rejected' : a.status === 'verified' ? 'verification_completed' : a.status === 'certificate_uploaded' ? 'certificate_uploaded' : a.status === 'verification_requested' ? 'verification_requested' : 'applied') as ApplicationStage,
+          applied_at: a.applied_at || nowISO(),
+          certificate_id: a.certificate_id && a.certificate_blockchain_status === 'confirmed' ? String(a.certificate_id) : null,
+        }));
+        const backendCertificates: Certificate[] = (applicationsResult.applications || [])
+          .filter((a: any) => a.certificate_id && a.certificate_transaction_hash)
+          .map((a: any) => ({
+            id: String(a.certificate_id),
+            student_id: String(a.student_id),
+            institute_id: String(session.entity.id),
+            record_id: '',
+            application_id: String(a.id),
+            file_name: a.submitted_file_name || 'certificate',
+            file_size: 0,
+            sha256_hash: a.submitted_sha256_hash || '',
+            ipfs_cid: a.submitted_ipfs_cid || '',
+            blockchain_tx_hash: a.certificate_transaction_hash || '',
+            blockchain_contract_address: '',
+            uploaded_at: a.updated_at || a.applied_at || nowISO(),
+          }));
+
+        setCertificates(backendCertificates);
+        setApplications(backendApplications);
+
+        const backendNotifications: AppNotification[] = (notificationsResult.notifications || []).map((n: any) => ({
+          id: String(n.id),
+          recipient_role: 'student',
+          recipient_id: String(n.user_id),
+          type: n.type as AppNotification['type'],
+          title: n.title || '',
+          message: n.message || '',
+          application_id: n.related_application_id ? String(n.related_application_id) : null,
+          student_id: null,
+          job_id: null,
+          read: Boolean(n.is_read),
+          created_at: n.created_at || nowISO(),
+        }));
+
+        setNotifications((prev) => {
+          const localNotifications = prev.filter((n) => n.recipient_role !== 'student' || !backendNotifications.some((bn) => bn.id === n.id));
+          return [...backendNotifications, ...localNotifications];
+        });
+
+        const backendRecords: AcademicRecord[] = (recordsResult.records || []).map(
+          (r: any) => ({
+            id: String(r.id),
+            student_id: String(r.student_id),
+            institute_id: String(r.institute_id),
+            degree: r.degree || r.title || '',
+            course: r.course || '',
+            grade: r.grade || '',
+            graduation_year: Number(r.graduation_year || 0),
+            created_at: r.created_at || nowISO(),
+          }),
+        );
+
+        setRecords((prev) => {
+          const otherRecords = prev.filter(
+            (record) => !backendRecords.some((r) => r.id === record.id),
+          );
+          return [...otherRecords, ...backendRecords];
+        });
+      } catch (error) {
+        console.error('Student backend sync failed:', error);
+      }
+    };
+
+    loadStudentData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  // ---- Company backend sync ----
+  useEffect(() => {
+    if (!session || session.user.role !== 'company') return;
+
+    let cancelled = false;
+
+    const loadCompanyData = async () => {
+      try {
+        const headers = {
+          'x-user-id': session.user.id,
+          'x-user-email': session.user.email,
+        };
+
+        const [companyResponse, jobsResponse, applicationsResponse, verificationRequestsResponse, notificationsResponse] = await Promise.all([
+          fetch(`${API_BASE_URL}/companies/me`, { headers }),
+          fetch(`${API_BASE_URL}/companies/me/jobs`, { headers }),
+          fetch(`${API_BASE_URL}/companies/me/applications`, { headers }),
+          fetch(`${API_BASE_URL}/companies/me/verification-requests`, { headers }),
+          fetch(`${API_BASE_URL}/companies/me/notifications`, { headers }),
+        ]);
+
+        if (!companyResponse.ok) {
+          throw new Error(`Company API failed: ${companyResponse.status}`);
+        }
+
+        if (!jobsResponse.ok) {
+          throw new Error(`Company jobs API failed: ${jobsResponse.status}`);
+        }
+
+        if (!applicationsResponse.ok) {
+          throw new Error(`Company applications API failed: ${applicationsResponse.status}`);
+        }
+        if (!verificationRequestsResponse.ok) {
+          throw new Error(`Company verification requests API failed: ${verificationRequestsResponse.status}`);
+        }
+
+        if (!notificationsResponse.ok) {
+          throw new Error(`Company notifications API failed: ${notificationsResponse.status}`);
+        }
+
+const companyResult = await companyResponse.json();
+        const jobsResult = await jobsResponse.json();
+        const applicationsResult = await applicationsResponse.json();
+        const verificationRequestsResult = await verificationRequestsResponse.json();
+        const notificationsResult = await notificationsResponse.json();
+if (cancelled) return;
+
+        const backendCompany = companyResult.company;
+
+        if (backendCompany) {
+          const mappedCompany: Company = {
+            id: String(backendCompany.id),
+            user_id: String(backendCompany.user_id),
+            name: backendCompany.company_name || '',
+            email: backendCompany.email || session.user.email,
+            industry: backendCompany.industry || '',
+            location: [
+              backendCompany.city,
+              backendCompany.state,
+              backendCompany.country,
+            ].filter(Boolean).join(', '),
+            created_at: backendCompany.created_at || nowISO(),
+          };
+
+          setCompanies((prev) => {
+            const exists = prev.some((c) => c.id === mappedCompany.id);
+            return exists
+              ? prev.map((c) => (c.id === mappedCompany.id ? mappedCompany : c))
+              : [...prev, mappedCompany];
+          });
+
+          setSession((prev) => {
+            if (!prev || prev.user.role !== 'company') return prev;
+            if (prev.entity?.id === mappedCompany.id) return prev;
+          return { ...prev, entity: mappedCompany };
+          });
+        }
+
+        const backendJobs: Job[] = (jobsResult.jobs || []).map((j: any) => ({
+          id: String(j.id),
+          company_id: String(j.company_id),
+          title: j.title || '',
+          description: j.description || '',
+          requirements: j.skills || j.experience_required || '',
+          location: j.location || '',
+          salary_range:
+            j.salary_min != null || j.salary_max != null
+              ? `${j.salary_min ?? ''}${j.salary_min != null || j.salary_max != null ? ' - ' : ''}${j.salary_max ?? ''}`
+              : '',
+          created_at: j.created_at || nowISO(),
+        }));
+
+        setJobs((prev) => {
+          const otherJobs = prev.filter(
+            (job) => !backendJobs.some((j) => j.id === job.id),
+          );
+          return [...otherJobs, ...backendJobs];
+        });
+const backendApplications: Application[] = (applicationsResult.applications || []).map((a: any)=> ({
+  id: String(a.id),
+  job_id: String(a.job_id),
+  student_id: String(a.student_id),
+  institute_id: String(a.institute_id || ''),
+  company_id: String(a.company_id || session.entity.id),
+  cover_note: a.cover_letter || '',
+  stage: (
+    a.status === 'selected'
+      ? 'selected'
+      : a.status === 'rejected'
+        ? 'rejected'
+        : a.status === 'verified'
+          ? 'verification_completed'
+          : a.status === 'certificate_uploaded'
+            ? 'certificate_uploaded'
+            : a.status === 'verification_requested'
+              ? 'verification_requested'
+              : 'applied'
+  ) as ApplicationStage,
+  applied_at: a.applied_at || nowISO(),
+  certificate_id: a.application_certificate_id
+    ? String(a.application_certificate_id)
+    : a.certificate_id
+      ? String(a.certificate_id)
+      : null,
+  student_name: a.student_name || '',
+  student_email: a.student_email || '',
+  student_phone: a.student_phone || '',
+  student_code: a.student_code || '',
+
+  institute_name: a.institute_name || '',
+
+  academic_record_id: a.academic_record_id
+    ? String(a.academic_record_id)
+    : null,
+  record_type: a.record_type || null,
+  academic_title: a.academic_title || null,
+  grade: a.grade || null,
+  percentage: a.percentage ?? null,
+  cgpa: a.cgpa ?? null,
+  issue_date: a.issue_date || null,
+  completion_date: a.completion_date || null,
+  academic_description: a.academic_description || null,
+
+  original_file_name: a.original_file_name || null,
+  sha256_hash: a.sha256_hash || null,
+  ipfs_cid: a.ipfs_cid || null,
+  ipfs_url: a.ipfs_url || null,
+  transaction_hash: a.transaction_hash || null,
+  contract_address: a.contract_address || null,
+  blockchain_certificate_id: a.blockchain_certificate_id || null,
+  blockchain_status: a.blockchain_status || null,
+  verification_status: a.verification_status || null,
+}));
+        const backendCertificates: Certificate[] = (applicationsResult.applications || [])
+          .filter((a: any) => a.certificate_id && a.certificate_transaction_hash)
+          .map((a: any) => ({
+            id: String(a.certificate_id),
+            student_id: String(a.student_id),
+            institute_id: String(session.entity.id),
+            record_id: '',
+            application_id: String(a.id),
+            file_name: a.submitted_file_name || 'certificate',
+            file_size: 0,
+            sha256_hash: a.submitted_sha256_hash || '',
+            ipfs_cid: a.submitted_ipfs_cid || '',
+            blockchain_tx_hash: a.certificate_transaction_hash || '',
+            blockchain_contract_address: '',
+            uploaded_at: a.updated_at || a.applied_at || nowISO(),
+          }));
+
+        setCertificates(backendCertificates);
+        setApplications(backendApplications);
+
+        const backendVerifications: Verification[] = (
+          verificationRequestsResult.verification_requests || []
+        ).map((r: any) => {
+          const relatedApplication = backendApplications.find(
+            (a) => a.id === String(r.application_id),
+          );
+          const blockchainPassed =
+            r.blockchain_status === 'confirmed' &&
+            r.verification_status === 'verified';
+
+          const aiVerdict =
+            r.ai_verdict === 'genuine'
+              ? 'genuine'
+              : r.ai_verdict === 'suspicious'
+                ? 'suspicious'
+                : r.ai_verdict === 'forged' ? 'forged' : null;
+
+          const hashMismatch =
+            r.hash_match === false ||
+            r.verification_blockchain_status === 'mismatch';
+
+          const verdict =
+            r.final_status === 'verified' || blockchainPassed
+              ? 'verified'
+              : r.final_status === 'suspicious'
+                ? 'suspicious'
+                : r.final_status === 'invalid' ||
+                    String(r.status).toLowerCase() === 'failed' ||
+                    hashMismatch
+                  ? 'invalid'
+                  : null;
+
+          return {
+            id: String(r.id),
+            application_id: String(r.application_id),
+            company_id: String(r.company_id),
+            student_id: String(r.student_id),
+            institute_id: String(relatedApplication?.institute_id || ''),
+            tier: r.verification_type as VerificationTier,
+            amount_paid: Number(r.fee_amount || 0),
+            payment_status: ['paid', 'processing', 'completed'].includes(String(r.status))
+              ? 'completed'
+              : 'pending',
+            blockchain_check: {
+              performed: blockchainPassed || hashMismatch,
+              stored_hash: String(r.sha256_hash || ''),
+              stored_cid: String(r.ipfs_cid || ''),
+              document_hash: String(r.submitted_sha256_hash || r.sha256_hash || ''),
+              match: typeof r.hash_match === 'boolean'
+                ? r.hash_match
+                : blockchainPassed
+                  ? true
+                  : null,
+            },
+            ai_forgery_check: {
+              performed: Boolean(r.ai_verdict || r.ai_checked_at || r.ai_result),
+              result: aiVerdict,
+              forgery_probability: r.report_data?.forgery_probability != null
+                ? Number(r.report_data.forgery_probability)
+                : null,
+              confidence_score: r.ai_confidence_score != null
+                ? Number(r.ai_confidence_score)
+                : r.confidence_score != null
+                  ? Number(r.confidence_score)
+                  : null,
+              indicators: Array.isArray(r.report_data?.indicators)
+                ? r.report_data.indicators
+                : [],
+            },
+            verdict,
+            confidence: r.ai_confidence_score != null
+              ? Number(r.ai_confidence_score)
+              : r.confidence_score != null
+                ? Number(r.confidence_score)
+                : null,
+            blockchain_proof_ref: r.transaction_hash || null,
+            report_generated_at: r.report_generated_at || r.completed_at || null,
+            created_at: r.created_at || nowISO(),
+          };
+        });
+
+        setVerifications((prev) => {
+          const backendIds = new Set(backendVerifications.map((v) => v.id));
+          return [
+            ...prev.filter((v) => !backendIds.has(v.id)),
+            ...backendVerifications,
+          ];
+        });
+        const backendNotifications: AppNotification[] = (notificationsResult.notifications || []).map((n: any) => ({
+          id: String(n.id),
+          recipient_role: 'company',
+          recipient_id: String(n.user_id),
+          type: n.type as AppNotification['type'],
+          title: n.title || '',
+          message: n.message || '',
+          application_id: n.related_application_id ? String(n.related_application_id) : null,
+          student_id: null,
+          job_id: null,
+          read: Boolean(n.is_read),
+          created_at: n.created_at || nowISO(),
+        }));
+
+        setNotifications((prev) => {
+          const localNotifications = prev.filter((n) => n.recipient_role !== 'company' || !backendNotifications.some((bn) => bn.id === n.id));
+          return [...backendNotifications, ...localNotifications];
+        });
+console.log('Company backend sync successful:', {
+          company: backendCompany,
+          jobs: jobsResult.jobs || [],
+          applications: applicationsResult.applications || [],
+        });
+      } catch (error) {
+        console.error('Company backend sync failed:', error);
+      }
+    };
+
+    loadCompanyData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+  // ---- Toast helpers ----
+  const pushToast = useCallback((message: string, type: Toast['type'] = 'success') => {
+    const id = uid('toast');
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4000);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // ---- Notification helper ----
+  const addNotification = useCallback((n: Omit<AppNotification, 'id' | 'read' | 'created_at'>) => {
+    const notif: AppNotification = {
+      ...n,
+      id: uid('notif'),
+      read: false,
+      created_at: nowISO(),
+    };
+    setNotifications((prev) => [notif, ...prev]);
+  }, []);
+
+  // ---- Auth ----
+    const login = useCallback(async (email: string, password: string, role: UserRole): Promise<boolean> => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/auth/login`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            email,
+            password,
+            role,         }),
+        });
+
+        if (!response.ok) { console.error('LOGIN HTTP ERROR:', response.status); return false; }
+
+        const result = await response.json(); console.log('LOGIN RESPONSE:', result);
+
+        if (!result.user || !result.entity) return false;
+
+        const backendUser: User = {
+          id: String(result.user.id),
+          email: result.user.email,
+          password_hash: '',
+          role: result.user.role,
+          name: result.user.full_name || '',
+          created_at: result.user.created_at || nowISO(),
+        };
+
+        let entity: Institute | Student | Company;
+
+        if (result.user.role === 'student') {
+          entity = {
+            id: String(result.entity.id),
+            user_id: String(result.entity.user_id),
+            full_name: result.user.full_name || '',
+            email: result.user.email || '',
+            institute_id: result.entity.institute_id ? String(result.entity.institute_id) : '',
+            enrollment_id: result.entity.student_id || result.entity.enrollment_id || '',
+            program: result.entity.course || result.entity.program || '',
+            created_at: result.entity.created_at || nowISO(),
+          };
+
+          setStudents((prev) => {
+            const exists = prev.some((s) => s.id === entity.id);
+            return exists
+              ? prev.map((s) => (s.id === entity.id ? entity as Student : s))
+              : [...prev, entity as Student];
+          });
+        } else if (result.user.role === 'institute') {
+          entity = {
+            id: String(result.entity.id),
+            user_id: String(result.entity.user_id),
+            name: result.entity.institute_name || '',
+            email: result.user.email || '',
+            location: [
+              result.entity.city,
+              result.entity.state,
+              result.entity.country,
+            ].filter(Boolean).join(', '),
+            established_year: new Date(result.entity.created_at || nowISO()).getFullYear(),
+            created_at: result.entity.created_at || nowISO(),
+          };
+
+          setInstitutes((prev) => {
+            const exists = prev.some((i) => i.id === entity.id);
+            return exists
+              ? prev.map((i) => (i.id === entity.id ? entity as Institute : i))
+              : [...prev, entity as Institute];
+          });
+        } else {
+          entity = {
+            id: String(result.entity.id),
+            user_id: String(result.entity.user_id),
+            name: result.entity.company_name || '',
+            email: result.user.email || '',
+            industry: result.entity.industry || '',
+            location: [
+              result.entity.city,
+              result.entity.state,
+              result.entity.country,
+            ].filter(Boolean).join(', '),
+            created_at: result.entity.created_at || nowISO(),
+          };
+
+          setCompanies((prev) => {
+            const exists = prev.some((c) => c.id === entity.id);
+            return exists
+              ? prev.map((c) => (c.id === entity.id ? entity as Company : c))
+              : [...prev, entity as Company];
+          });
+        }
+
+        setSession({
+          user: backendUser,
+          entity,
+        });
+
+        return true;
+      } catch (error) {
+        console.error('Login failed:', error);
+        return false;
+      }
+    }, []);
+        const register = useCallback((data: { email: string; password: string; role: UserRole; name: string; extra?: Record<string, string> }): boolean => {
+    if (users.some((u) => u.email.toLowerCase() === data.email.toLowerCase())) {
+      return false;
+    }
+    const userId = uid('usr');
+    const newUser: User = {
+      id: userId,
+      email: data.email,
+      password_hash: 'mock_' + data.password,
+      role: data.role,
+      name: data.name,
+      created_at: nowISO(),
+    };
+    setUsers((prev) => [...prev, newUser]);
+
+    let entity: Institute | Student | Company;
+    if (data.role === 'institute') {
+      const inst: Institute = {
+        id: uid('inst'),
+        user_id: userId,
+        name: data.name,
+        email: data.email,
+        location: data.extra?.location || '',
+        established_year: Number(data.extra?.establishedYear) || new Date().getFullYear(),
+        created_at: nowISO(),
+      };
+      entity = inst;
+      setInstitutes((prev) => [...prev, inst]);
+    } else if (data.role === 'student') {
+      const instId = data.extra?.instituteId || institutes[0]?.id || '';
+      const stu: Student = {
+        id: uid('stu'),
+        user_id: userId,
+        full_name: data.name,
+        email: data.email,
+        institute_id: instId,
+        enrollment_id: data.extra?.enrollmentId || uid('enr'),
+        program: data.extra?.program || '',
+        created_at: nowISO(),
+      };
+      entity = stu;
+      setStudents((prev) => [...prev, stu]);
+    } else {
+      const comp: Company = {
+        id: uid('comp'),
+        user_id: userId,
+        name: data.name,
+        email: data.email,
+        industry: data.extra?.industry || '',
+        location: data.extra?.location || '',
+        created_at: nowISO(),
+      };
+      entity = comp;
+      setCompanies((prev) => [...prev, comp]);
+    }
+    setSession({ user: newUser, entity });
+    return true;
+  }, [users, institutes]);
+
+  const logout = useCallback(() => setSession(null), []);
+
+  // ---- Institute: Add Student ----
+  const addStudent = useCallback((data: { fullName: string; email: string; enrollmentId: string; program: string }) => {
+    if (!session || session.user.role !== 'institute') return;
+    const inst = session.entity as Institute;
+    const userId = uid('usr');
+    const newStudent: Student = {
+      id: uid('stu'),
+      user_id: userId,
+      full_name: data.fullName,
+      email: data.email,
+      institute_id: inst.id,
+      enrollment_id: data.enrollmentId,
+      program: data.program,
+      created_at: nowISO(),
+    };
+    setUsers((prev) => [...prev, { id: userId, email: data.email, password_hash: 'mock', role: 'student', name: data.fullName, created_at: nowISO() }]);
+    setStudents((prev) => [...prev, newStudent]);
+    pushToast(`Student "${data.fullName}" added successfully`, 'success');
+  }, [session, pushToast]);
+
+  // ---- Institute: Update Academic Record ----
+  const updateAcademicRecord = useCallback(async (recordId: string, data: {
+    studentId: string;
+    degree: string;
+    course: string;
+    grade: string;
+    graduationYear: number;
+  }) => {
+    if (!session || session.user.role !== 'institute') {
+      throw new Error('Only institutes can update academic records');
+    }
+
+    try {
+      const response = await apiRequest<any>(
+        `/institutes/me/academic-records/${encodeURIComponent(recordId)}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'x-user-id': session.user.id,
+            'x-user-email': session.user.email,
+          },
+          body: JSON.stringify({
+            student_id: data.studentId,
+            record_type: data.degree,
+            title: data.degree,
+            course: data.course,
+            grade: data.grade,
+            completion_date: `${data.graduationYear}-12-31`,
+          }),
+        },
+      );
+
+      if (!response.success || response.record?.id == null) {
+        throw new Error(response.message || 'Failed to update academic record');
+      }
+
+      const record = response.record;
+      const updatedRecord: AcademicRecord = {
+        id: String(record.id),
+        student_id: String(record.student_id),
+        institute_id: String(record.institute_id),
+        degree: record.title || data.degree,
+        course: record.course || data.course,
+        grade: record.grade || data.grade,
+        graduation_year: data.graduationYear,
+        created_at: record.created_at || nowISO(),
+      };
+
+      setRecords((prev) =>
+        prev.map((item) =>
+          String(item.id) === String(recordId) ? updatedRecord : item
+        )
+      );
+
+      pushToast('Academic record updated successfully', 'success');
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : 'Failed to update academic record';
+      pushToast(message, 'error');
+      throw error;
+    }
+  }, [session, pushToast]);
+  // ---- Institute: Add Academic Record ----
+  const addAcademicRecord = useCallback(async (data: {
+    studentId: string;
+    degree: string;
+    course: string;
+    grade: string;
+    graduationYear: number;
+  }) => {
+    if (!session || session.user.role !== 'institute') return;
+
+    try {
+      const response = await apiRequest<any>(
+        '/institutes/me/academic-records',
+        {
+          method: 'POST',
+          headers: {
+            'x-user-id': session.user.id,
+            'x-user-email': session.user.email,
+          },
+          body: JSON.stringify({
+            student_id: data.studentId,
+            record_type: data.degree,
+            title: data.degree,
+            course: data.course,
+            grade: data.grade,
+            completion_date: `${data.graduationYear}-12-31`,
+          }),
+        },
+      );
+
+      if (!response.success || response.record?.id == null) {
+        throw new Error(response.message || 'Failed to create academic record');
+      }
+
+      const record = response.record;
+      const newRecord: AcademicRecord = {
+        id: String(record.id),
+        student_id: String(record.student_id),
+        institute_id: String(record.institute_id),
+        degree: record.title || data.degree,
+        course: record.course || data.course,
+        grade: record.grade || data.grade,
+        graduation_year: data.graduationYear,
+        created_at: record.created_at || nowISO(),
+      };
+
+      setRecords((prev) => [...prev, newRecord]);
+      pushToast('Academic record added successfully', 'success');
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : 'Failed to create academic record';
+      pushToast(message, 'error');
+      throw error;
+    }
+  }, [session, pushToast]);
+
+  // ---- Institute: Upload Certificate (3-step process) ----
+  const uploadCertificate = useCallback(async (data: {
+    applicationId: string; studentId: string; recordId: string; file: File;
+  }): Promise<Certificate> => {
+    if (!session) throw new Error('No session');
+    const inst = session.entity as Institute;
+
+    const formData = new FormData();
+    formData.append('academic_record_id', data.recordId);
+      formData.append('application_id', data.applicationId);
+    formData.append('original_file_name', data.file.name);
+    formData.append('mime_type', data.file.type || 'application/octet-stream');
+    formData.append('certificate', data.file);
+
+    const response = await fetch(`${API_BASE_URL}/institutes/me/certificates`, {
+      method: 'POST',
+      headers: {
+        'x-user-id': session.user.id,
+      'x-user-email': session.user.email,
+      },
+      body: formData,
+    });
+
+    const result = await response.json(); console.log('LOGIN RESPONSE:', result);
+
+    if (!response.ok || !result.success || !result.certificate) {
+      throw new Error(result.message || 'Certificate upload failed');
+    }
+
+    const backendCert = result.certificate;
+
+    const cert: Certificate = {
+      id: backendCert.id,
+      student_id: backendCert.student_id,
+      institute_id: backendCert.institute_id,
+      record_id: backendCert.academic_record_id,
+      application_id: data.applicationId,
+      file_name: backendCert.original_file_name || data.file.name,
+      file_size: Number(backendCert.file_size || data.file.size),
+      sha256_hash: backendCert.sha256_hash,
+      ipfs_cid: backendCert.ipfs_cid,
+      blockchain_tx_hash: backendCert.transaction_hash,
+      blockchain_contract_address: backendCert.contract_address,
+      uploaded_at: backendCert.created_at || nowISO(),
+    };
+
+    setCertificates((prev) => [...prev, cert]);
+
+    // Update application stage
+    setApplications((prev) =>
+      prev.map((a) =>
+        a.id === data.applicationId
+          ? { ...a, stage: 'certificate_uploaded', certificate_id: cert.id }
+          : a,
+      ),
+    );
+
+    // Notify company that certificate is uploaded
+    const app = applications.find((a) => a.id === data.applicationId);
+    if (app) {
+      addNotification({
+        recipient_role: 'company',
+        recipient_id: app.company_id,
+        type: 'certificate_uploaded',
+        title: 'Certificate Uploaded',
+        message: `Institute has uploaded the certificate for ${data.studentId}. Verification is now available.`,
+        application_id: data.applicationId,
+        student_id: data.studentId,
+        job_id: app.job_id,
+      });
+    }
+
+    pushToast('Certificate uploaded and stored on blockchain', 'success');
+    return cert;
+  }, [session, applications, addNotification, pushToast]);
+
+  // ---- Institute: Approve Application ----
+  const approveApplication = useCallback(async (applicationId: string): Promise<void> => {
+    if (!session || session.user.role !== 'institute') {
+      pushToast('Institute session required.', 'error');
+      return;
+    }
+
+    try {
+      const result = await apiRequest<{
+        success: boolean;
+        message: string;
+        application?: {
+          id: number | string;
+          status: string;
+        };
+      }>(`/institutes/me/applications/${applicationId}/approve`, {
+        method: 'PATCH',
+        headers: {
+          'x-user-id': session.user.id,
+          'x-user-email': session.user.email,
+        },
+      });
+
+      if (!result.success || !result.application) {
+        throw new Error(result.message || 'Failed to approve application');
+      }
+
+      setApplications((prev) =>
+        prev.map((app) =>
+          app.id === applicationId
+            ? { ...app, stage: 'selected' }
+            : app,
+        ),
+      );
+
+      pushToast('Application approved successfully.', 'success');
+    } catch (error) {
+      console.error('Approve application failed:', error);
+      pushToast(
+        error instanceof Error ? error.message : 'Failed to approve application',
+        'error',
+      );
+    }
+  }, [session, pushToast]);
+
+  // ---- Institute: Reject Application ----
+  const rejectApplication = useCallback(async (applicationId: string): Promise<void> => {
+    if (!session || session.user.role !== 'institute') {
+      pushToast('Institute session required.', 'error');
+      return;
+    }
+
+    try {
+      const result = await apiRequest<{
+        success: boolean;
+        message: string;
+        application?: {
+          id: number | string;
+          status: string;
+        };
+      }>(`/institutes/me/applications/${applicationId}/reject`, {
+        method: 'PATCH',
+        headers: {
+          'x-user-id': session.user.id,
+          'x-user-email': session.user.email,
+        },
+      });
+
+      if (!result.success || !result.application) {
+        throw new Error(result.message || 'Failed to reject application');
+      }
+
+      setApplications((prev) =>
+        prev.map((app) =>
+          app.id === applicationId
+            ? { ...app, stage: 'rejected' }
+            : app,
+        ),
+      );
+
+      pushToast('Application rejected successfully.', 'success');
+    } catch (error) {
+      console.error('Reject application failed:', error);
+      pushToast(
+        error instanceof Error ? error.message : 'Failed to reject application',
+        'error',
+      );
+    }
+  }, [session, pushToast]);
+  // ---- Student: Apply to Job ----
+  const applyToJob = useCallback(async (jobId: string, coverNote: string): Promise<void> => {
+    if (!session || session.user.role !== 'student') return;
+
+    const stu = session.entity as Student;
+    const job = jobs.find((j) => j.id === jobId);
+
+    if (!job) {
+      pushToast('Job not found.', 'error');
+      return;
+    }
+
+    try {
+      const result = await apiRequest<{
+        success: boolean;
+        message: string;
+        application?: {
+          id: number | string;
+          job_id: number | string;
+          student_id: number | string;
+          status: string;
+          cover_letter: string | null;
+          created_at?: string;
+          applied_at?: string;
+        };
+      }>(`/students/jobs/${jobId}/apply`, {
+        method: 'POST',
+        headers: {
+          'x-user-id': session.user.id,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          cover_letter: coverNote,
+        }),
+      });
+
+      const backendApplication = result.application;
+
+      if (!backendApplication) {
+        throw new Error(result.message || 'Application was not created');
+      }
+
+      const newApp: Application = {
+        id: String(backendApplication.id),
+        job_id: String(backendApplication.job_id ?? jobId),
+        student_id: String(backendApplication.student_id ?? stu.id),
+        institute_id: stu.institute_id,
+        company_id: job.company_id,
+        cover_note: backendApplication.cover_letter ?? coverNote,
+        stage: 'applied',
+        applied_at:
+          backendApplication.applied_at ||
+          backendApplication.created_at ||
+          nowISO(),
+        certificate_id: null,
+      };
+
+      setApplications((prev) => {
+        const exists = prev.some((app) => app.id === newApp.id);
+        return exists
+          ? prev.map((app) => (app.id === newApp.id ? newApp : app))
+          : [newApp, ...prev];
+      });
+
+      // Notify institute: "Student X applied for Job Y"
+      addNotification({
+        recipient_role: 'institute',
+        recipient_id: stu.institute_id,
+        type: 'student_applied',
+        title: 'Student Applied for Job',
+        message: `${stu.full_name} applied for "${job.title}" ï¿½ upload their certificate for verification.`,
+        application_id: newApp.id,
+        student_id: newApp.student_id,
+        job_id: newApp.job_id,
+      });
+
+      pushToast('Job application submitted successfully.', 'success');
+    } catch (error) {
+      console.error('Apply to job failed:', error);
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Failed to submit job application';
+
+      pushToast(message, 'error');
+    }
+  }, [session, jobs, pushToast, addNotification]);
+  // ---- Company: Post Job ----
+  const postJob = useCallback(async (data: { title: string; description: string; requirements: string; location: string; salaryRange: string }) => {
+    if (!session || session.user.role !== 'company') return;
+
+    try {
+      const salaryParts = data.salaryRange
+        .split('-')
+        .map((part) => part.trim())
+        .filter(Boolean);
+
+      const salary_min = salaryParts[0] || null;
+      const salary_max = salaryParts[1] || salaryParts[0] || null;
+
+      const response = await fetch(`${API_BASE_URL}/companies/me/jobs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': session.user.id,
+          'x-user-email': session.user.email,
+        },
+        body: JSON.stringify({
+          title: data.title,
+          description: data.description,
+          location: data.location,
+          employment_type: 'Full-time',
+          experience_required: '',
+          salary_min,
+          salary_max,
+          skills: data.requirements,
+          status: 'open',
+          application_deadline: null,
+        }),
+      });
+
+      const result = await response.json(); console.log('LOGIN RESPONSE:', result);
+
+      if (!response.ok || !result.success || !result.job) {
+        throw new Error(result.message || 'Failed to post job');
+      }
+
+      const j = result.job;
+
+      const newJob: Job = {
+        id: String(j.id),
+        company_id: String(j.company_id),
+        title: j.title || '',
+        description: j.description || '',
+        requirements: j.skills || j.experience_required || '',
+        location: j.location || '',
+        salary_range:
+          j.salary_min != null || j.salary_max != null
+            ? `${j.salary_min ?? ''}${j.salary_min != null && j.salary_max != null ? ' - ' : ''}${j.salary_max ?? ''}`
+            : '',
+        created_at: j.created_at || nowISO(),
+      };
+
+      setJobs((prev) => [...prev, newJob]);
+      pushToast('Job posted successfully', 'success');
+    } catch (error) {
+      console.error('Company job posting failed:', error);
+      pushToast(
+        error instanceof Error ? error.message : 'Failed to post job',
+        'error'
+      );
+    }
+  }, [session, pushToast]);
+
+  // ---- Company: Request Verification (paid tier) ----
+  // ---- Company: Request Verification (real backend) ----
+const requestVerification = useCallback(
+  async (
+    applicationId: string,
+    tier: VerificationTier,
+  ): Promise<Verification> => {
+    if (!session) throw new Error('No session');
+
+    const comp = session.entity as Company;
+
+    const app = applications.find((a) => a.id === applicationId);
+    if (!app) throw new Error('Application not found');
+
+    const cert = certificates.find((c) => c.id === app.certificate_id);
+    if (!cert && !app.sha256_hash && !app.original_file_name) {
+      throw new Error('No certificate found');
+    }
+
+    // ============================================================
+    // REAL BACKEND REQUEST
+    // ============================================================
+
+    const response = await fetch(
+      `http://localhost:5000/api/companies/me/applications/${applicationId}/verification-request`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': session.user.id,
+      'x-user-email': session.user.email,
+        },
+        body: JSON.stringify({
+          verification_type: tier,
+        }),
+      },
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data?.message || 'Failed to create verification request',
+      );
+    }
+
+    const backendRequest = data.verification_request;
+
+    if (!backendRequest) {
+      throw new Error(
+        'Backend did not return a verification_request',
+      );
+    }
+
+    // ============================================================
+    // Convert backend response into the existing frontend
+    // Verification structure.
+    //
+    // This means your existing UI does NOT need to change.
+    // ============================================================
+
+    const prices: Record<VerificationTier, number> = {
+      blockchain: 999,
+      ai_forgery: 1999,
+      combined: 2999,
+    };
+
+    const verification: Verification = {
+      id: String(backendRequest.id),
+
+      application_id: applicationId,
+
+      company_id: comp.id,
+
+      student_id: app.student_id,
+
+      institute_id: app.institute_id,
+
+      tier,
+
+      amount_paid: prices[tier],
+
+      // Backend has only CREATED the request.
+      // Payment is handled by your existing backend payment route.
+      payment_status: 'pending',
+
+      blockchain_check: {
+        performed: false,
+
+        // IMPORTANT:
+        // This is the REAL certificate hash coming from your
+        // certificate/backend data, NOT a mock hash.
+        stored_hash: cert?.sha256_hash || app.sha256_hash || '',
+
+        stored_cid: cert?.ipfs_cid || app.ipfs_cid || '',
+
+        document_hash: cert?.sha256_hash || app.sha256_hash || '',
+
+        match: null,
+      },
+
+      ai_forgery_check: {
+        performed: false,
+
+        result: null,
+
+        confidence_score: null,
+        forgery_probability: null,
+
+        indicators: [],
+      },
+
+      verdict: null,
+
+      confidence: null,
+
+      blockchain_proof_ref: null,
+
+      report_generated_at: null,
+
+      created_at:
+        backendRequest.created_at || nowISO(),
+    };
+
+    // ============================================================
+    // Update local frontend state
+    // ============================================================
+
+    setVerifications((prev) => {
+      // Prevent duplicate verification entries
+      const alreadyExists = prev.some(
+        (v) => v.id === verification.id,
+      );
+
+      if (alreadyExists) {
+        return prev.map((v) =>
+          v.id === verification.id ? verification : v,
+        );
+      }
+
+      return [...prev, verification];
+    });
+
+    // ============================================================
+    // Update application stage
+    // ============================================================
+
+    setApplications((prev) =>
+      prev.map((a) =>
+        a.id === applicationId
+          ? {
+              ...a,
+              stage: 'verification_requested',
+            }
+          : a,
+      ),
+    );
+
+    // ============================================================
+    // Notify institute
+    // ============================================================
+
+    addNotification({
+          recipient_role: 'student',
+
+      recipient_id: app.institute_id,
+
+      type: 'verification_requested',
+
+      title: 'Verification Requested',
+
+      message: `${comp.name} has requested verification for a student's certificate.`,
+
+      application_id: applicationId,
+
+      student_id: app.student_id,
+
+      job_id: app.job_id,
+    });
+
+    // ============================================================
+    // Toast
+    // ============================================================
+
+    pushToast(
+      'Certificate verification request created successfully',
+      'success',
+    );
+
+    // ============================================================
+    // IMPORTANT:
+    //
+    // DO NOT run:
+    //
+    // verifyOnChain(...)
+    // detectForgery(...)
+    // computeVerdict(...)
+    // mockTxHash(...)
+    //
+    // here.
+    //
+    // The backend now controls the real verification workflow.
+    // ============================================================
+
+    return verification;
+  },
+  [
+    session,
+    applications,
+    certificates,
+    addNotification,
+    pushToast,
+  ],
+);
+
+  const payForVerification = useCallback(async (verificationId: string): Promise<void> => {
+    if (!session) throw new Error('Not authenticated');
+
+    const loadRazorpay = (): Promise<void> =>
+      new Promise((resolve, reject) => {
+        if (window.Razorpay) {
+          resolve();
+          return;
+        }
+
+        const existingScript = document.querySelector(
+          'script[src="https://checkout.razorpay.com/v1/checkout.js"]',
+        );
+
+        if (existingScript) {
+          existingScript.addEventListener('load', () => resolve(), { once: true });
+          existingScript.addEventListener(
+            'error',
+            () => reject(new Error('Failed to load Razorpay Checkout.')),
+            { once: true },
+          );
+          return;
+        }
+
+        const script = document.createElement('script');
+        script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+        script.async = true;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('Failed to load Razorpay Checkout.'));
+        document.body.appendChild(script);
+      });
+
+    await loadRazorpay();
+
+    const orderResponse = await apiRequest<any>(
+      `/companies/me/verification-requests/${verificationId}/payment/order`,
+      {
+        method: 'POST',
+        headers: {
+          'x-user-id': session.user.id,
+          'x-user-email': session.user.email,
+        },
+        body: JSON.stringify({}),
+      },
+    );
+
+    const order = orderResponse.order;
+
+    if (!order?.id || !orderResponse.key_id) {
+      throw new Error('Invalid Razorpay order response.');
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        callback();
+      };
+
+      const razorpay = new window.Razorpay({
+        key: orderResponse.key_id,
+        amount: order.amount,
+        currency: order.currency,
+        name: 'CertChain',
+        description: 'Certificate verification payment',
+        order_id: order.id,
+        prefill: {
+          email: session.user.email,
+        },
+        notes: {
+          verification_request_id: verificationId,
+        },
+        handler: async (paymentResponse: {
+          razorpay_payment_id: string;
+          razorpay_order_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            const verifyResponse = await apiRequest<any>(
+              `/companies/me/verification-requests/${verificationId}/payment/verify`,
+              {
+                method: 'POST',
+                headers: {
+                  'x-user-id': session.user.id,
+                  'x-user-email': session.user.email,
+                },
+                body: JSON.stringify(paymentResponse),
+              },
+            );
+
+            setVerifications((prev) =>
+              prev.map((v) =>
+                v.id === verificationId
+                  ? { ...v, payment_status: 'completed' }
+                  : v,
+              ),
+            );
+
+            pushToast(
+              verifyResponse.message || 'Payment completed successfully',
+              'success',
+            );
+
+            finish(resolve);
+          } catch (error) {
+            finish(() =>
+              reject(
+                error instanceof Error
+                  ? error
+                  : new Error('Payment verification failed.'),
+              ),
+            );
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            finish(() => reject(new Error('Payment was cancelled.')));
+          },
+        },
+      });
+
+      razorpay.on('payment.failed', (failureResponse: any) => {
+        finish(() =>
+          reject(
+            new Error(
+              failureResponse?.error?.description || 'Payment failed.',
+            ),
+          ),
+        );
+      });
+
+      razorpay.open();
+    });
+  }, [session, pushToast]);
+  const verifyOnBlockchain = useCallback(async (verificationId: string, certificateFile: File): Promise<void> => {
+    if (!session) throw new Error('Not authenticated');
+
+    let response: any;
+    try {
+      response = await apiRequest<any>(`/companies/me/verification-requests/${verificationId}/blockchain-verify`, {
+        method: 'POST',
+        headers: {
+          'x-user-id': session.user.id,
+          'x-user-email': session.user.email,
+        },
+        body: (() => { const formData = new FormData(); formData.append("certificate", certificateFile); return formData; })(),
+      });
+    } catch (error) {
+      const apiError = error as Error & { status?: number; data?: any };
+      const failure = apiError.data;
+      if (apiError.status === 422 && failure?.verdict === 'invalid') {
+        setVerifications((prev) => prev.map((v) => v.id === verificationId ? {
+          ...v,
+          payment_status: 'completed',
+          blockchain_check: { ...v.blockchain_check, performed: true, match: false, document_hash: String(failure.submitted_sha256_hash || "") },
+          verdict: 'invalid',
+          confidence: 0,
+          report_generated_at: nowISO(),
+        } : v));
+      }
+      throw error;
+    }
+
+    const updatedRequest = response.verification_request;
+    const verification = verifications.find((v) => v.id === verificationId);
+    const application = verification
+      ? applications.find((a) => a.id === verification.application_id)
+      : undefined;
+
+    if (updatedRequest) {
+      setVerifications((prev) =>
+        prev.map((v) =>
+          v.id === verificationId
+            ? {
+                ...v,
+                payment_status: 'completed',
+                blockchain_check: {
+                  ...v.blockchain_check,
+                  performed: true,
+                  match: response.verified ?? null,
+                },
+                verdict: response.verdict ?? (response.verified ? 'verified' : 'invalid'),
+                confidence: response.confidence ?? (response.verified ? 100 : 0),
+                blockchain_proof_ref:
+                  response.transaction_hash ||
+                  response.tx_hash ||
+                  v.blockchain_proof_ref,
+              }
+            : v,
+        ),
+      );
+    }
+
+    if (application) {
+      const alreadyNotified = notifications.some(
+        (n) =>
+          n.type === 'verification_result_student' &&
+          n.application_id === application.id,
+      );
+
+      if (!alreadyNotified) {
+        const verdict = response.verdict ?? (response.verified ? 'verified' : 'invalid');
+
+        addNotification({
+          recipient_role: 'student',
+          recipient_id: application.student_id,
+          type: 'verification_result_student',
+          title: 'Verification Result',
+          message: `Your certificate verification result is ${String(verdict).toUpperCase()}.`,
+          application_id: application.id,
+          student_id: application.student_id,
+          job_id: application.job_id,
+        });
+      }
+    }
+
+    pushToast(response.message || 'Blockchain verification completed', 'success');
+  }, [
+    session,
+    verifications,
+    applications,
+    notifications,
+    addNotification,
+    pushToast,
+  ]);  // ---- Notifications ----
+    const verifyWithAI = useCallback(async (verificationId: string): Promise<void> => {
+      if (!session) throw new Error('Not authenticated');
+
+      const response = await apiRequest<any>(`/companies/me/verification-requests/${verificationId}/ai-verify`, {
+        method: 'POST',
+        headers: {
+          'x-user-id': session.user.id,
+          'x-user-email': session.user.email,
+        },
+        body: JSON.stringify({}),
+      });
+
+      const aiVerification = response.ai_verification;
+      const verification = verifications.find((v) => v.id === verificationId);
+      const application = verification
+        ? applications.find((a) => a.id === verification.application_id)
+        : undefined;
+
+      if (aiVerification) {
+        setVerifications((prev) =>
+          prev.map((v) =>
+            v.id === verificationId
+              ? {
+                  ...v,
+                  payment_status: 'completed',
+                  ai_forgery_check: {
+                    ...v.ai_forgery_check,
+                    performed: true,
+                    result:
+                      aiVerification.verdict === 'genuine'
+                        ? 'genuine'
+                        : aiVerification.verdict === 'suspicious'
+                          ? 'suspicious'
+                          : aiVerification.verdict === 'forged'
+                            ? 'forged'
+                            : null,
+                    confidence_score: aiVerification.confidence_score ?? null,
+                    forgery_probability: aiVerification.forgery_probability ?? null,
+                    indicators: aiVerification.indicators || [],
+                  },
+                  verdict:
+                    aiVerification.verdict === 'genuine'
+                      ? 'verified'
+                      : aiVerification.verdict === 'suspicious'
+                        ? 'suspicious'
+                        : 'invalid',
+                  confidence: aiVerification.confidence_score ?? null,
+                }
+              : v,
+          ),
+        );
+      }
+
+      if (application) {
+        const verdict =
+          aiVerification?.verdict === 'genuine'
+            ? 'verified'
+            : aiVerification?.verdict === 'suspicious'
+              ? 'suspicious'
+              : 'invalid';
+
+        addNotification({
+          recipient_role: 'student',
+          recipient_id: application.student_id,
+          type: 'verification_result_student',
+          title: 'AI Verification Result',
+          message: `Your certificate AI verification result is ${aiVerification?.verdict}.`,
+          application_id: application.id,
+          student_id: application.student_id,
+          job_id: application.job_id,
+        });
+      }
+
+      pushToast(
+        response.message || 'AI forgery verification completed',
+        'success',
+      );
+    }, [
+      session,
+      verifications,
+      applications,
+      addNotification,
+      pushToast,
+    ]);
+
+  const getNotificationsFor = useCallback((role: UserRole, userId: string): AppNotification[] => {
+    return notifications.filter((n) => {
+      if (n.recipient_role !== role) return false;
+      // Match by entity id (institute_id, student_id, company_id) or user_id
+      if (role === 'institute') return n.recipient_id === userId || institutes.some((i) => i.user_id === userId && i.id === n.recipient_id);
+      if (role === 'student') return n.recipient_id === userId || students.some((s) => s.user_id === userId && s.id === n.recipient_id);
+      if (role === 'company') return n.recipient_id === userId || companies.some((c) => c.user_id === userId && c.id === n.recipient_id);
+      return false;
+    });
+  }, [notifications, institutes, students, companies]);
+
+  const markNotificationRead = useCallback((id: string) => {
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+  }, []);
+
+  const markAllNotificationsRead = useCallback((role: UserRole, userId: string) => {
+    const relevant = getNotificationsFor(role, userId).map((n) => n.id);
+    setNotifications((prev) => prev.map((n) => (relevant.includes(n.id) ? { ...n, read: true } : n)));
+  }, [getNotificationsFor]);
+
+  // ---- Helpers ----
+  const getStudentRecords = useCallback((studentId: string) => records.filter((r) => r.student_id === studentId), [records]);
+  const getStudentApplications = useCallback((studentId: string) => applications.filter((a) => a.student_id === studentId), [applications]);
+  const getCompanyApplications = useCallback((companyId: string) => applications.filter((a) => a.company_id === companyId), [applications]);
+  const getInstituteStudents = useCallback((instituteId: string) => students.filter((s) => s.institute_id === instituteId), [students]);
+  const getInstituteRecords = useCallback((instituteId: string) => records.filter((r) => r.institute_id === instituteId), [records]);
+  const getVerificationForApplication = useCallback((applicationId: string) => verifications.filter((v) => v.application_id === applicationId).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0], [verifications]);
+  const getCertificateForApplication = useCallback((applicationId: string) => certificates.find((c) => c.application_id === applicationId), [certificates]);
+  const getJobById = useCallback((id: string) => jobs.find((j) => j.id === id), [jobs]);
+  const getStudentById = useCallback((id: string) => students.find((s) => s.id === id), [students]);
+  const getCompanyById = useCallback((id: string) => companies.find((c) => c.id === id), [companies]);
+  const getInstituteById = useCallback((id: string) => institutes.find((i) => i.id === id), [institutes]);
+  const getRecordById = useCallback((id: string) => records.find((r) => r.id === id), [records]);
+  const getApplicationById = useCallback((id: string) => applications.find((a) => a.id === id), [applications]);
+
+  const value: StoreContextValue = {
+    session, login, register, logout,
+    users, institutes, students, companies, records, certificates, jobs, applications, verifications, notifications,
+    addStudent, addAcademicRecord, updateAcademicRecord, uploadCertificate, approveApplication, rejectApplication,
+    applyToJob,
+    postJob, requestVerification, payForVerification, verifyOnBlockchain, verifyWithAI,
+    getNotificationsFor, markNotificationRead, markAllNotificationsRead,
+    toasts, pushToast, dismissToast,
+    getStudentRecords, getStudentApplications, getCompanyApplications,
+    getInstituteStudents, getInstituteRecords,
+    getVerificationForApplication, getCertificateForApplication,
+    getJobById, getStudentById, getCompanyById, getInstituteById, getRecordById, getApplicationById,
+  };
+
+  return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
+}
+
+// ============================================================
+// Hook
+// ============================================================
+
+export function useStore(): StoreContextValue {
+  const ctx = useContext(StoreContext);
+  if (!ctx) throw new Error('useStore must be used within StoreProvider');
+  return ctx;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

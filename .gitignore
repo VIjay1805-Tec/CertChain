@@ -1,0 +1,95 @@
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.env
+
+# Environment files and secrets (all project folders)
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local blockchain data and secrets
+blockchain/cache/
+blockchain/artifacts/
+
+# Logs and local database files
+*.log
+*.sqlite
+*.sqlite3
+
+# AI training and backup models (keep the active API model)
+backend/python-ai/certificate_forgery_model_384.keras
+backend/python-ai/certificate_forgery_stage1.keras
+
+# Hardhat generated files in nested folders
+**/artifacts/
+**/cache/
+**/typechain-types/
+**/coverage/
+
+# Python virtual environments and caches
+**/__pycache__/
+**/.venv/
+**/venv/
+
+# Environment backup files and local secrets
+*.env
+*.env.*
+.env.*
+
+# Database backups (keep local; may contain private records)
+backups/
+*.dump
+*.sql
+*.backup
+
+# Temporary and backup files
+*.bak
+eslint.config.js.bak
+verification-route-search.txt
+PROJECT_INFO.zip
+
+# Bolt.new local configuration and prompts
+.bolt/
+
+# Historical source-code backups
+*.backup
+*.backup-*
+*.before-*
+*.bak
+backend/backup-verification-*/
